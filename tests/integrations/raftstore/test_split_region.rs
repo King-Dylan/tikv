@@ -25,6 +25,14 @@ use txn_types::{Key, PessimisticLock};
 pub const REGION_MAX_SIZE: u64 = 50000;
 pub const REGION_SPLIT_SIZE: u64 = 30000;
 
+
+
+
+use std::sync::{atomic::*, *};
+use raftstore::store::{PeerMsg, PeerTick};
+use tikv_util::{config::ReadableDuration, HandyRwLock};
+
+
 fn test_base_split_region<T, F>(cluster: &mut Cluster<T>, split: F, right_derive: bool)
 where
     T: Simulator,
@@ -1265,4 +1273,103 @@ fn test_gen_split_check_bucket_ranges() {
     let region = pd_client.get_region(b"k10").unwrap();
     // the bucket_ranges should be None to refresh the bucket
     cluster.send_half_split_region_message(&region, None);
+}
+
+
+
+
+#[test]
+fn test_online_split_region_size() {
+    let mut cluster = new_node_cluster(0, 3);
+    let base_tick_ms = 50;
+    let region_split_size = 2000;
+    let region_split_keys = 1000;
+    let region_max_size = 3000;
+    let region_max_keys = 1500;
+    cluster.cfg.coprocessor.region_split_size = ReadableSize(region_split_size);
+    cluster.cfg.coprocessor.region_split_keys = Some(region_split_keys);
+    cluster.cfg.coprocessor.region_max_size = Some(ReadableSize(region_max_size));
+    cluster.cfg.coprocessor.region_max_keys = Some(region_max_keys);
+    cluster.cfg.raft_store.raft_base_tick_interval = ReadableDuration::millis(base_tick_ms);
+    cluster.cfg.raft_store.raft_heartbeat_ticks = 2;
+    cluster.cfg.raft_store.raft_election_timeout_ticks = 10;
+    // So the random election timeout will always be 10, which makes the case more stable.
+    cluster.cfg.raft_store.raft_min_election_timeout_ticks = 10;
+    cluster.cfg.raft_store.raft_max_election_timeout_ticks = 11;
+    cluster.pd_client.disable_default_operator();
+    let r = cluster.run_conf_change();
+    cluster.pd_client.must_add_peer(r, new_peer(2, 2));
+    cluster.pd_client.must_add_peer(r, new_peer(3, 3));
+
+    let value = vec![1_u8; 8096];
+    for i in 0..10 {
+        let mut reqs = vec![];
+        for j in 0..150 {
+            let k = format!("k{}", i * 10 + j);
+            reqs.push(new_put_cf_cmd("write", k.as_bytes(), &value));
+        }
+        cluster.batch_put("k100".as_bytes(), reqs).unwrap();
+    }
+    // Wait until all peers of region 1 hibernate and then stop peer 2.
+   // thread::sleep(Duration::from_millis(base_tick_ms * 30));
+    //cluster.stop_node(2);
+
+    // Peer 3 will:
+    // 1. steps a heartbeat message from its leader and then ticks 1 time.
+    // 2. ticks a peer_stale_state_check, which will change state from Idle to PreChaos.
+    // 3. continues to tick until it hibernates totally.
+    let (tx, rx) = mpsc::sync_channel(128);
+    fail::cfg_callback("on_raft_base_tick_idle", move || tx.send(0).unwrap()).unwrap();
+    let mut raft_msg = RaftMessage::default();
+    raft_msg.region_id = 1;
+    raft_msg.set_from_peer(new_peer(1, 1));
+    raft_msg.set_to_peer(new_peer(3, 3));
+    raft_msg.mut_region_epoch().version = 1;
+    raft_msg.mut_region_epoch().conf_ver = 3;
+    raft_msg.mut_message().msg_type = MessageType::MsgHeartbeat;
+    raft_msg.mut_message().from = 1;
+    raft_msg.mut_message().to = 3;
+    raft_msg.mut_message().term = 6;
+    let router = cluster.sim.rl().get_router(3).unwrap();
+    router.send_raft_message(raft_msg).unwrap();
+
+    rx.recv_timeout(Duration::from_millis(200)).unwrap();
+    fail::remove("on_raft_base_tick_idle");
+    router
+        .send(1, PeerMsg::Tick(PeerTick::Raft))
+        .unwrap();
+
+    let init_region_number = cluster.pd_client.get_regions_number();
+    let region_split_size = 1000;
+    let region_split_keys = 500;
+    let region_max_size = 1500;
+    let region_max_keys = 750;
+    cluster.cfg.coprocessor.region_split_size = ReadableSize(region_split_size);
+    cluster.cfg.coprocessor.region_split_keys = Some(region_split_keys);
+    cluster.cfg.coprocessor.region_max_size = Some(ReadableSize(region_max_size).clone());
+    cluster.cfg.coprocessor.region_max_keys = Some(region_max_keys);
+    // Wait until the peer 3 hibernates again.
+    // Until here, peer 3 will be like `election_elapsed=3 && missing_ticks=6`.
+    let (tx, rx) = mpsc::sync_channel(128);
+    fail::cfg_callback("on_raft_base_tick_idle", move || tx.send(0).unwrap()).unwrap();
+    let mut raft_msg = RaftMessage::default();
+    raft_msg.region_id = 1;
+    raft_msg.set_from_peer(new_peer(1, 1));
+    raft_msg.set_to_peer(new_peer(3, 3));
+    raft_msg.mut_region_epoch().version = 1;
+    raft_msg.mut_region_epoch().conf_ver = 3;
+    raft_msg.mut_message().msg_type = MessageType::MsgHeartbeat;
+    raft_msg.mut_message().from = 1;
+    raft_msg.mut_message().to = 3;
+    raft_msg.mut_message().term = 6;
+    let router = cluster.sim.rl().get_router(3).unwrap();
+    router.send_raft_message(raft_msg).unwrap();
+
+    rx.recv_timeout(Duration::from_millis(200)).unwrap();
+    fail::remove("on_raft_base_tick_idle");
+    router
+        .send(1, PeerMsg::Tick(PeerTick::Raft))
+        .unwrap();
+    let region_number = cluster.pd_client.get_regions_number();
+    assert_ne!(init_region_number,region_number, "init_region_number value:{},region_number value:{}", init_region_number,region_number);
 }

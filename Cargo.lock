@@ -3787,8 +3787,8 @@ dependencies = [
 
 [[package]]
 name = "pprof"
-version = "0.9.0"
-source = "git+https://github.com/tikv/pprof-rs.git?rev=a5a993a33a23557b27e633f18723366281d3b1c0#a5a993a33a23557b27e633f18723366281d3b1c0"
+version = "0.9.1"
+source = "git+https://github.com/tikv/pprof-rs.git?rev=fb65ca7ae728373724b39bf8b7a1dddabd75a518#fb65ca7ae728373724b39bf8b7a1dddabd75a518"
 dependencies = [
  "backtrace",
  "cfg-if 1.0.0",
