@@ -63,7 +63,7 @@ use self::memtrace::*;
 #[cfg(any(test, feature = "testexport"))]
 use crate::store::PeerInternalStat;
 use crate::{
-    coprocessor::{RegionChangeEvent, RegionChangeReason},
+    coprocessor::{RegionChangeEvent, RegionChangeReason,config::Config as CopCfg},
     store::{
         cmd_resp::{bind_term, new_error},
         fsm::{
@@ -232,6 +232,7 @@ where
     pub fn create(
         store_id: u64,
         cfg: &Config,
+        copcfg: &CopCfg,
         region_scheduler: Scheduler<RegionTask<EK::Snapshot>>,
         raftlog_fetch_scheduler: Scheduler<RaftlogFetchTask>,
         engines: Engines<EK, ER>,
@@ -261,6 +262,7 @@ where
                 peer: Peer::new(
                     store_id,
                     cfg,
+                    copcfg,
                     region_scheduler,
                     raftlog_fetch_scheduler,
                     engines,
@@ -291,6 +293,7 @@ where
     pub fn replicate(
         store_id: u64,
         cfg: &Config,
+        copcfg: &CopCfg,
         region_scheduler: Scheduler<RegionTask<EK::Snapshot>>,
         raftlog_fetch_scheduler: Scheduler<RaftlogFetchTask>,
         engines: Engines<EK, ER>,
@@ -315,6 +318,7 @@ where
                 peer: Peer::new(
                     store_id,
                     cfg,
+                    copcfg,
                     region_scheduler,
                     raftlog_fetch_scheduler,
                     engines,
@@ -1919,6 +1923,17 @@ where
             self.fsm.peer.mut_store().flush_cache_metrics();
             return;
         }
+       // When change split-key/size, trigger split checker to split region
+        if self.fsm.peer.last_region_split_size != self.ctx.coprocessor_host.cfg.region_split_size || self.fsm.peer.last_region_split_keys !=  self.ctx.coprocessor_host.cfg.region_split_keys {
+            self.fsm.peer.may_skip_split_check = false;
+            self.register_split_region_check_tick();
+            if self.fsm.peer.last_region_split_size !=  self.ctx.coprocessor_host.cfg.region_split_size {
+                self.fsm.peer.last_region_split_size =  self.ctx.coprocessor_host.cfg.region_split_size;
+            }
+            if self.fsm.peer.last_region_split_keys !=  self.ctx.coprocessor_host.cfg.region_split_keys {
+                self.fsm.peer.last_region_split_keys =  self.ctx.coprocessor_host.cfg.region_split_keys;
+            }
+          };
         // When having pending snapshot, if election timeout is met, it can't pass
         // the pending conf change check because first index has been updated to
         // a value that is larger than last index.
@@ -3697,6 +3712,7 @@ where
             let (sender, mut new_peer) = match PeerFsm::create(
                 self.ctx.store_id(),
                 &self.ctx.cfg,
+                &self.ctx.coprocessor_host.cfg,
                 self.ctx.region_scheduler.clone(),
                 self.ctx.raftlog_fetch_scheduler.clone(),
                 self.ctx.engines.clone(),

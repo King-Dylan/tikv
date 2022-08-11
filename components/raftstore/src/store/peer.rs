@@ -13,7 +13,7 @@ use std::{
     time::{Duration, Instant},
     u64, usize,
 };
-
+use tikv_util::config::ReadableSize;
 use bitflags::bitflags;
 use bytes::Bytes;
 use collections::{HashMap, HashSet};
@@ -82,7 +82,7 @@ use super::{
     DestroyPeerJob,
 };
 use crate::{
-    coprocessor::{CoprocessorHost, RegionChangeEvent, RegionChangeReason, RoleChange},
+    coprocessor::{CoprocessorHost, RegionChangeEvent, RegionChangeReason, RoleChange,config::Config as CopCfg},
     errors::RAFTSTORE_IS_BUSY,
     store::{
         async_io::{write::WriteMsg, write_router::WriteRouter},
@@ -768,6 +768,8 @@ where
     ///  the region or ingested one file which may be overlapped with the existed data,
     /// reset the flag so that the region can be splitted again.
     pub may_skip_split_check: bool,
+    pub last_region_split_size: ReadableSize,
+    pub last_region_split_keys: Option<u64>,
 
     /// The state for consistency check.
     pub consistency_state: ConsistencyState,
@@ -878,6 +880,7 @@ where
     pub fn new(
         store_id: u64,
         cfg: &Config,
+        copcfg: &CopCfg,
         region_scheduler: Scheduler<RegionTask<EK::Snapshot>>,
         raftlog_fetch_scheduler: Scheduler<RaftlogFetchTask>,
         engines: Engines<EK, ER>,
@@ -933,6 +936,8 @@ where
             down_peer_ids: vec![],
             size_diff_hint: 0,
             delete_keys_hint: 0,
+            last_region_split_size: copcfg.region_split_size,
+            last_region_split_keys: copcfg.region_split_keys,
             approximate_size: None,
             approximate_keys: None,
             may_skip_split_check: false,

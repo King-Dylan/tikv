@@ -5,8 +5,10 @@ use std::{
     sync::{mpsc::channel, Arc},
     thread,
     time::Duration,
+    collections::HashMap,
 };
 
+use tikv_util::{config::ReadableDuration, HandyRwLock};
 use engine_rocks::Compat;
 use engine_traits::{Iterable, Peekable, CF_WRITE};
 use keys::data_key;
@@ -18,9 +20,9 @@ use raftstore::{
     Result,
 };
 use test_raftstore::*;
-use tikv::storage::{kv::SnapshotExt, Snapshot};
-use tikv_util::config::*;
+use tikv::{storage::{kv::SnapshotExt, Snapshot}};
 use txn_types::{Key, PessimisticLock};
+use tikv_util::config::ReadableSize;
 
 pub const REGION_MAX_SIZE: u64 = 50000;
 pub const REGION_SPLIT_SIZE: u64 = 30000;
@@ -1266,3 +1268,72 @@ fn test_gen_split_check_bucket_ranges() {
     // the bucket_ranges should be None to refresh the bucket
     cluster.send_half_split_region_message(&region, None);
 }
+
+// Test region split after config changed
+#[test]
+fn test_online_split_region_size() {
+ 
+    let count = 3;
+    let mut cluster = new_node_cluster(0,count);
+    //let mut cluster = new_server_cluster(0, count);
+    cluster.cfg.raft_store.region_split_check_diff = Some(ReadableSize(3000));
+    cluster.cfg.coprocessor.region_max_size = Some(ReadableSize(2000));
+    cluster.cfg.coprocessor.region_split_size = ReadableSize(2000);
+    cluster.cfg.coprocessor.region_max_keys = Some(1000);
+    //cluster.cfg.coprocessor.region_split_keys = Some(1000);
+    //cluster.cfg.coprocessor.region_size_threshold_for_approximate = ReadableSize(1000);
+    cluster.cfg.coprocessor.batch_split_limit = 1;
+    cluster.cfg.raft_store.raft_log_gc_tick_interval = ReadableDuration::secs(20);
+    cluster.cfg.raft_store.raft_base_tick_interval = ReadableDuration::millis(50);
+    cluster.cfg.raft_store.split_region_check_tick_interval = ReadableDuration::millis(1000);
+    cluster.cfg.raft_store.hibernate_regions = false;
+    
+    //cluster.pd_client.disable_default_operator();
+    cluster.cfg.raft_store.raft_heartbeat_ticks = 2;
+    cluster.cfg.raft_store.raft_election_timeout_ticks = 10;
+    // So the random election timeout will always be 10, which makes the case more stable.
+    cluster.cfg.raft_store.raft_min_election_timeout_ticks = 10;
+    cluster.cfg.raft_store.raft_max_election_timeout_ticks = 11;
+    cluster.run();
+
+    let pd_client = Arc::clone(&cluster.pd_client);
+    let mut range = 1..;
+    put_till_size(&mut cluster, 1000, &mut range);
+    std::thread::sleep(Duration::from_millis(1000));
+    let init_region_number = pd_client.get_regions_number();
+
+    let sim = cluster.sim.rl();
+    let cfg_controller = sim.get_cfg_controller().unwrap();
+     {
+        let change = {
+            let mut change = HashMap::new();
+            change.insert("coprocessor.region_split_size".to_owned(), "100".to_owned());
+            change.insert("coprocessor.region_split_keys".to_owned(), "100".to_owned());
+            change.insert("coprocessor.region_max_size".to_owned(), "200".to_owned());
+            change
+        };
+        // Update config,
+        cfg_controller.update(change.clone()).unwrap();
+        cluster.cfg.coprocessor.region_split_size = ReadableSize(100);
+        cluster.cfg.coprocessor.region_split_keys = Some(100);
+        cluster.cfg.coprocessor.region_max_size = Some(ReadableSize(200));
+        assert_eq!(
+            cfg_controller
+                .get_current()
+                .coprocessor
+                .region_split_size,
+                ReadableSize(100)
+        );
+        assert_eq!(
+            cfg_controller
+                .get_current()
+                .coprocessor
+                .region_split_keys,
+                Some(100)
+        );
+    }
+    std::thread::sleep(Duration::from_millis(10000));
+    let region_number = pd_client.get_regions_number();
+    assert_ne!(init_region_number,region_number, "init_region_number value:{},region_number value:{}", init_region_number,region_number);
+}
+
