@@ -172,6 +172,13 @@ where
             }
         };
 
+        println!(
+            "size checker, region {:?}, size {}, max_size {}",
+            region,
+            region_size,
+            host.cfg.region_max_size().0
+        );
+
         // send it to raftstore to update region approximate size
         let res = CasualMessage::RegionApproximateSize { size: region_size };
         if let Err(e) = self.router.lock().unwrap().send(region_id, res) {

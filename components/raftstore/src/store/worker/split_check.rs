@@ -202,14 +202,16 @@ impl Display for Task {
                 start_key,
                 end_key,
                 auto_split,
+                policy,
                 ..
             } => write!(
                 f,
-                "[split check worker] Split Check Task for {}, start_key: {:?}, end_key: {:?}, auto_split: {:?}",
+                "[split check worker] Split Check Task for {}, start_key: {:?}, end_key: {:?}, auto_split: {:?}, policy: {:?}",
                 region.get_id(),
                 start_key,
                 end_key,
-                auto_split
+                auto_split,
+                policy,
             ),
             Task::ChangeConfig(_) => write!(f, "[split check worker] Change Config Task"),
             #[cfg(any(test, feature = "testexport"))]
@@ -372,6 +374,7 @@ where
             "policy" => ?policy,
         );
         CHECK_SPILT_COUNTER.all.inc();
+        println!("build split checker host, cfg: {:?}", self.coprocessor.cfg);
         let mut host =
             self.coprocessor
                 .new_split_checker_host(region, &self.engine, auto_split, policy);
@@ -383,6 +386,7 @@ where
                 "start_key" => log_wrappers::Value::key(&start_key),
                 "end_key" => log_wrappers::Value::key(&end_key),
             );
+            println!("skip split check");
             return;
         }
 
@@ -621,10 +625,17 @@ where
     }
 
     fn change_cfg(&mut self, change: ConfigChange) {
+        let before = self.coprocessor.cfg.clone();
         if let Err(e) = self.coprocessor.cfg.update(change.clone()) {
             error!("update split check config failed"; "err" => ?e);
             return;
         };
+        if let Err(e) = self.coprocessor.cfg.validate() {
+            error!("validate updated split check config failed"; "err" => ?e, "change" => ?change);
+            self.coprocessor.cfg = before;
+            return;
+        }
+        println!("after change: {:?}", self.coprocessor.cfg);
         info!(
             "split check config updated";
             "change" => ?change
@@ -640,6 +651,11 @@ where
     type Task = Task;
     fn run(&mut self, task: Task) {
         let _io_type_guard = WithIoType::new(IoType::LoadBalance);
+        println!(
+            "split check task {}, thread: {:?}",
+            task,
+            std::thread::current()
+        );
         match task {
             Task::SplitCheckTask {
                 region,

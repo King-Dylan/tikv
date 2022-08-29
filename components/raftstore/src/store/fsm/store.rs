@@ -67,8 +67,8 @@ use time::{self, Timespec};
 use crate::{
     bytes_capacity,
     coprocessor::{
-        split_observer::SplitObserver, BoxAdminObserver, CoprocessorHost, RegionChangeEvent,
-        RegionChangeReason,
+        split_observer::SplitObserver, BoxAdminObserver, Config as CopConfig, CoprocessorHost,
+        RegionChangeEvent, RegionChangeReason,
     },
     store::{
         async_io::write::{StoreWriters, Worker as WriteWorker, WriteMsg},
@@ -771,6 +771,7 @@ pub struct RaftPoller<EK: KvEngine + 'static, ER: RaftEngine + 'static, T: 'stat
     poll_ctx: PollContext<EK, ER, T>,
     messages_per_tick: usize,
     cfg_tracker: Tracker<Config>,
+    // cop_cfg_tracker: Tracker<CopConfig>,
     trace_event: TraceEvent,
     last_flush_time: TiInstant,
     need_flush_events: bool,

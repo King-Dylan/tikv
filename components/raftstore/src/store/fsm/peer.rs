@@ -63,7 +63,7 @@ use self::memtrace::*;
 #[cfg(any(test, feature = "testexport"))]
 use crate::store::PeerInternalStat;
 use crate::{
-    coprocessor::{RegionChangeEvent, RegionChangeReason,config::Config as CopCfg},
+    coprocessor::{config::Config as CopCfg, RegionChangeEvent, RegionChangeReason},
     store::{
         cmd_resp::{bind_term, new_error},
         fsm::{
@@ -1932,17 +1932,27 @@ where
             self.fsm.peer.mut_store().flush_entry_cache_metrics();
             return;
         }
-       // When change split-key/size, trigger split checker to split region
-        if self.fsm.peer.last_region_split_size != self.ctx.coprocessor_host.cfg.region_split_size || self.fsm.peer.last_region_split_keys !=  self.ctx.coprocessor_host.cfg.region_split_keys {
+        // When change split-key/size, trigger split checker to split region
+        if self.fsm.peer.last_region_split_size != self.ctx.coprocessor_host.cfg.region_split_size
+            || self.fsm.peer.last_region_split_keys
+                != self.ctx.coprocessor_host.cfg.region_split_keys
+        {
+            println!("register split check");
             self.fsm.peer.may_skip_split_check = false;
             self.register_split_region_check_tick();
-            if self.fsm.peer.last_region_split_size !=  self.ctx.coprocessor_host.cfg.region_split_size {
-                self.fsm.peer.last_region_split_size =  self.ctx.coprocessor_host.cfg.region_split_size;
+            if self.fsm.peer.last_region_split_size
+                != self.ctx.coprocessor_host.cfg.region_split_size
+            {
+                self.fsm.peer.last_region_split_size =
+                    self.ctx.coprocessor_host.cfg.region_split_size;
             }
-            if self.fsm.peer.last_region_split_keys !=  self.ctx.coprocessor_host.cfg.region_split_keys {
-                self.fsm.peer.last_region_split_keys =  self.ctx.coprocessor_host.cfg.region_split_keys;
+            if self.fsm.peer.last_region_split_keys
+                != self.ctx.coprocessor_host.cfg.region_split_keys
+            {
+                self.fsm.peer.last_region_split_keys =
+                    self.ctx.coprocessor_host.cfg.region_split_keys;
             }
-          };
+        };
         // When having pending snapshot, if election timeout is met, it can't pass
         // the pending conf change check because first index has been updated to
         // a value that is larger than last index.
