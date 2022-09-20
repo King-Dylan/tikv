@@ -14,7 +14,7 @@ use std::{
     time::{Duration, Instant},
     u64, usize,
 };
-use tikv_util::config::ReadableSize;
+
 use bitflags::bitflags;
 use bytes::Bytes;
 use collections::{HashMap, HashSet};
@@ -85,7 +85,7 @@ use super::{
     DestroyPeerJob, LocalReadContext,
 };
 use crate::{
-    coprocessor::{CoprocessorHost, RegionChangeEvent, RegionChangeReason, RoleChange,config::Config as CopCfg},
+    coprocessor::{CoprocessorHost, RegionChangeEvent, RegionChangeReason, RoleChange},
     errors::RAFTSTORE_IS_BUSY,
     store::{
         async_io::{write::WriteMsg, write_router::WriteRouter},
@@ -866,8 +866,6 @@ where
     /// with the existed data, reset the flag so that the region can be
     /// splitted again.
     pub may_skip_split_check: bool,
-    pub last_region_split_size: ReadableSize,
-    pub last_region_split_keys: Option<u64>,
 
     /// The state for consistency check.
     pub consistency_state: ConsistencyState,
@@ -982,7 +980,6 @@ where
     pub fn new(
         store_id: u64,
         cfg: &Config,
-        copcfg: &CopCfg,
         region_scheduler: Scheduler<RegionTask<EK::Snapshot>>,
         raftlog_fetch_scheduler: Scheduler<RaftlogFetchTask>,
         engines: Engines<EK, ER>,
@@ -1040,8 +1037,6 @@ where
             down_peer_ids: vec![],
             size_diff_hint: 0,
             delete_keys_hint: 0,
-            last_region_split_size: copcfg.region_split_size,
-            last_region_split_keys: copcfg.region_split_keys,
             approximate_size: None,
             approximate_keys: None,
             may_skip_split_check: false,
@@ -5012,7 +5007,9 @@ where
     }
 
     pub fn maybe_gen_approximate_buckets<T>(&self, ctx: &PollContext<EK, ER, T>) {
-        if ctx.coprocessor_host.cfg.enable_region_bucket && !self.region().get_peers().is_empty() {
+        if ctx.coprocessor_host.cfg.value().enable_region_bucket
+            && !self.region().get_peers().is_empty()
+        {
             if let Err(e) = ctx
                 .split_check_scheduler
                 .schedule(SplitCheckTask::ApproximateBuckets(self.region().clone()))

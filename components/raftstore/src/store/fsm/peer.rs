@@ -66,7 +66,7 @@ use self::memtrace::*;
 #[cfg(any(test, feature = "testexport"))]
 use crate::store::PeerInternalStat;
 use crate::{
-    coprocessor::{config::Config as CopCfg, RegionChangeEvent, RegionChangeReason},
+    coprocessor::{config::Config as CopConfig, RegionChangeEvent, RegionChangeReason},
     store::{
         cmd_resp::{bind_term, new_error},
         fsm::{
@@ -174,6 +174,8 @@ where
     /// Before actually destroying a peer, ensure all log gc tasks are finished,
     /// so we can start destroying without seeking.
     logs_gc_flushed: bool,
+    last_region_split_size: u64,
+    last_region_split_keys: u64,
 }
 
 pub struct BatchRaftCmdRequestBuilder<E>
@@ -243,7 +245,7 @@ where
     pub fn create(
         store_id: u64,
         cfg: &Config,
-        copcfg: &CopCfg,
+        cop_cfg: &CopConfig,
         region_scheduler: Scheduler<RegionTask<EK::Snapshot>>,
         raftlog_fetch_scheduler: Scheduler<RaftlogFetchTask>,
         engines: Engines<EK, ER>,
@@ -273,7 +275,6 @@ where
                 peer: Peer::new(
                     store_id,
                     cfg,
-                    copcfg,
                     region_scheduler,
                     raftlog_fetch_scheduler,
                     engines,
@@ -294,6 +295,8 @@ where
                 trace: PeerMemoryTrace::default(),
                 delayed_destroy: None,
                 logs_gc_flushed: false,
+                last_region_split_keys: cop_cfg.region_split_keys(),
+                last_region_split_size: cop_cfg.region_split_size.0,
             }),
         ))
     }
@@ -304,7 +307,7 @@ where
     pub fn replicate(
         store_id: u64,
         cfg: &Config,
-        copcfg: &CopCfg,
+        cop_cfg: &CopConfig,
         region_scheduler: Scheduler<RegionTask<EK::Snapshot>>,
         raftlog_fetch_scheduler: Scheduler<RaftlogFetchTask>,
         engines: Engines<EK, ER>,
@@ -329,7 +332,6 @@ where
                 peer: Peer::new(
                     store_id,
                     cfg,
-                    copcfg,
                     region_scheduler,
                     raftlog_fetch_scheduler,
                     engines,
@@ -350,6 +352,8 @@ where
                 trace: PeerMemoryTrace::default(),
                 delayed_destroy: None,
                 logs_gc_flushed: false,
+                last_region_split_keys: cop_cfg.region_split_keys(),
+                last_region_split_size: cop_cfg.region_split_size.0,
             }),
         ))
     }
@@ -2080,25 +2084,17 @@ where
             return;
         }
         // When change split-key/size, trigger split checker to split region
-        if self.fsm.peer.last_region_split_size != self.ctx.coprocessor_host.cfg.region_split_size
-            || self.fsm.peer.last_region_split_keys
-                != self.ctx.coprocessor_host.cfg.region_split_keys
+        let (region_split_size, region_split_keys) = {
+            let cop_cfg = self.ctx.coprocessor_host.cfg.value();
+            (cop_cfg.region_split_size.0, cop_cfg.region_split_keys())
+        };
+        if self.fsm.last_region_split_size != region_split_size
+            || self.fsm.last_region_split_keys != region_split_keys
         {
-            println!("register split check");
             self.fsm.peer.may_skip_split_check = false;
             self.register_split_region_check_tick();
-            if self.fsm.peer.last_region_split_size
-                != self.ctx.coprocessor_host.cfg.region_split_size
-            {
-                self.fsm.peer.last_region_split_size =
-                    self.ctx.coprocessor_host.cfg.region_split_size;
-            }
-            if self.fsm.peer.last_region_split_keys
-                != self.ctx.coprocessor_host.cfg.region_split_keys
-            {
-                self.fsm.peer.last_region_split_keys =
-                    self.ctx.coprocessor_host.cfg.region_split_keys;
-            }
+            self.fsm.last_region_split_size = region_split_size;
+            self.fsm.last_region_split_keys = region_split_keys;
         };
         // When having pending snapshot, if election timeout is met, it can't pass
         // the pending conf change check because first index has been updated to
@@ -3923,7 +3919,7 @@ where
             let (sender, mut new_peer) = match PeerFsm::create(
                 self.ctx.store_id(),
                 &self.ctx.cfg,
-                &self.ctx.coprocessor_host.cfg,
+                &self.ctx.coprocessor_host.cfg.value(),
                 self.ctx.region_scheduler.clone(),
                 self.ctx.raftlog_fetch_scheduler.clone(),
                 self.ctx.engines.clone(),
@@ -5631,6 +5627,7 @@ where
                 .unwrap_or_default();
         }
         let mut region_buckets: BucketStat;
+        let cop_cfg = self.ctx.coprocessor_host.cfg.value();
         if let Some(bucket_ranges) = bucket_ranges {
             assert_eq!(buckets.len(), bucket_ranges.len());
             let mut i = 0;
@@ -5648,8 +5645,7 @@ where
                 // the bucket size is small and does not have split keys,
                 // then it should be merged with its left neighbor
                 let region_bucket_merge_size =
-                    self.ctx.coprocessor_host.cfg.region_bucket_merge_size_ratio
-                        * (self.ctx.coprocessor_host.cfg.region_bucket_size.0 as f64);
+                    cop_cfg.region_bucket_merge_size_ratio * (cop_cfg.region_bucket_size.0 as f64);
                 if bucket.keys.is_empty() && bucket.size <= (region_bucket_merge_size as u64) {
                     meta.sizes[i] = bucket.size;
                     // i is not the last entry (which is end key)
@@ -5658,8 +5654,7 @@ where
                     // and the left neighbor + current bucket size is not very big
                     if meta.keys.len() > 2
                         && i != 0
-                        && meta.sizes[i - 1] + bucket.size
-                            < self.ctx.coprocessor_host.cfg.region_bucket_size.0 * 2
+                        && meta.sizes[i - 1] + bucket.size < cop_cfg.region_bucket_size.0 * 2
                     {
                         // bucket is too small
                         region_buckets.left_merge(i);
@@ -5693,7 +5688,7 @@ where
                 region_epoch,
                 version: gen_bucket_version(self.fsm.peer.term(), current_version),
                 keys: bucket_keys,
-                sizes: vec![self.ctx.coprocessor_host.cfg.region_bucket_size.0; bucket_count],
+                sizes: vec![cop_cfg.region_bucket_size.0; bucket_count],
             };
             meta.keys.insert(0, region.get_start_key().to_vec());
             meta.keys.push(region.get_end_key().to_vec());
@@ -5740,7 +5735,8 @@ where
 
     // generate bucket range list to run split-check (to further split buckets)
     fn gen_bucket_range_for_update(&self) -> Option<Vec<BucketRange>> {
-        if !self.ctx.coprocessor_host.cfg.enable_region_bucket {
+        let cop_cfg = self.ctx.coprocessor_host.cfg.value();
+        if !cop_cfg.enable_region_bucket {
             return None;
         }
         let region_buckets = self.fsm.peer.region_buckets.as_ref()?;
@@ -5780,8 +5776,7 @@ where
 
             // if the bucket's write_bytes exceed half of the configured region_bucket_size,
             // add it to the bucket_ranges for checking update
-            let bucket_update_diff_size_threshold =
-                self.ctx.coprocessor_host.cfg.region_bucket_size.0 / 2;
+            let bucket_update_diff_size_threshold = cop_cfg.region_bucket_size.0 / 2;
             if diff_in_bytes >= bucket_update_diff_size_threshold {
                 bucket_ranges.push(BucketRange(keys[i].clone(), keys[i + 1].clone()));
             }

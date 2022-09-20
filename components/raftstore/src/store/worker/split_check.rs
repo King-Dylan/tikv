@@ -14,7 +14,6 @@ use kvproto::{
     metapb::{Region, RegionEpoch},
     pdpb::CheckPolicy,
 };
-use online_config::{ConfigChange, OnlineConfig};
 use tikv_util::{box_err, debug, error, info, keybuilder::KeyBuilder, warn, worker::Runnable};
 use txn_types::Key;
 
@@ -153,7 +152,6 @@ pub enum Task {
         bucket_ranges: Option<Vec<BucketRange>>,
     },
     ApproximateBuckets(Region),
-    ChangeConfig(ConfigChange),
     #[cfg(any(test, feature = "testexport"))]
     Validate(Box<dyn FnOnce(&Config) + Send>),
 }
@@ -213,7 +211,6 @@ impl Display for Task {
                 auto_split,
                 policy,
             ),
-            Task::ChangeConfig(_) => write!(f, "[split check worker] Change Config Task"),
             #[cfg(any(test, feature = "testexport"))]
             Task::Validate(_) => write!(f, "[split check worker] Validate config"),
             Task::ApproximateBuckets(_) => write!(f, "[split check worker] Approximate buckets"),
@@ -246,7 +243,7 @@ where
     fn approximate_check_bucket(
         &self,
         region: &Region,
-        host: &mut SplitCheckerHost<'_, E>,
+        host: &mut SplitCheckerHost<E>,
         bucket_ranges: Option<Vec<BucketRange>>,
     ) -> Result<()> {
         let ranges = bucket_ranges.clone().unwrap_or_else(|| {
@@ -374,7 +371,6 @@ where
             "policy" => ?policy,
         );
         CHECK_SPILT_COUNTER.all.inc();
-        println!("build split checker host, cfg: {:?}", self.coprocessor.cfg);
         let mut host =
             self.coprocessor
                 .new_split_checker_host(region, &self.engine, auto_split, policy);
@@ -386,7 +382,6 @@ where
                 "start_key" => log_wrappers::Value::key(&start_key),
                 "end_key" => log_wrappers::Value::key(&end_key),
             );
-            println!("skip split check");
             return;
         }
 
@@ -488,7 +483,7 @@ where
     ///                If it's Some(vec![]), skip generating buckets.
     fn scan_split_keys(
         &self,
-        host: &mut SplitCheckerHost<'_, E>,
+        host: &mut SplitCheckerHost<E>,
         region: &Region,
         is_key_range: bool,
         start_key: &[u8],
@@ -623,24 +618,6 @@ where
 
         Ok(host.split_keys())
     }
-
-    fn change_cfg(&mut self, change: ConfigChange) {
-        let before = self.coprocessor.cfg.clone();
-        if let Err(e) = self.coprocessor.cfg.update(change.clone()) {
-            error!("update split check config failed"; "err" => ?e);
-            return;
-        };
-        if let Err(e) = self.coprocessor.cfg.validate() {
-            error!("validate updated split check config failed"; "err" => ?e, "change" => ?change);
-            self.coprocessor.cfg = before;
-            return;
-        }
-        println!("after change: {:?}", self.coprocessor.cfg);
-        info!(
-            "split check config updated";
-            "change" => ?change
-        );
-    }
 }
 
 impl<E, S> Runnable for Runner<E, S>
@@ -651,11 +628,6 @@ where
     type Task = Task;
     fn run(&mut self, task: Task) {
         let _io_type_guard = WithIoType::new(IoType::LoadBalance);
-        println!(
-            "split check task {}, thread: {:?}",
-            task,
-            std::thread::current()
-        );
         match task {
             Task::SplitCheckTask {
                 region,
@@ -672,9 +644,8 @@ where
                 policy,
                 bucket_ranges,
             ),
-            Task::ChangeConfig(c) => self.change_cfg(c),
             Task::ApproximateBuckets(region) => {
-                if self.coprocessor.cfg.enable_region_bucket {
+                if self.coprocessor.cfg.value().enable_region_bucket {
                     let mut host = self.coprocessor.new_split_checker_host(
                         &region,
                         &self.engine,
@@ -690,7 +661,7 @@ where
                 }
             }
             #[cfg(any(test, feature = "testexport"))]
-            Task::Validate(f) => f(&self.coprocessor.cfg),
+            Task::Validate(f) => f(&self.coprocessor.cfg.value()),
         }
     }
 }

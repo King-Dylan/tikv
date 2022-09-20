@@ -64,8 +64,8 @@ use time::{self, Timespec};
 use crate::{
     bytes_capacity,
     coprocessor::{
-        split_observer::SplitObserver, BoxAdminObserver, Config as CopConfig, CoprocessorHost,
-        RegionChangeEvent, RegionChangeReason,
+        split_observer::SplitObserver, BoxAdminObserver, CoprocessorHost, RegionChangeEvent,
+        RegionChangeReason,
     },
     store::{
         async_io::{
@@ -769,7 +769,6 @@ pub struct RaftPoller<EK: KvEngine + 'static, ER: RaftEngine + 'static, T: 'stat
     poll_ctx: PollContext<EK, ER, T>,
     messages_per_tick: usize,
     cfg_tracker: Tracker<Config>,
-    // cop_cfg_tracker: Tracker<CopConfig>,
     trace_event: TraceEvent,
     last_flush_time: TiInstant,
     need_flush_events: bool,
@@ -1140,7 +1139,7 @@ impl<EK: KvEngine, ER: RaftEngine, T> RaftPollerBuilder<EK, ER, T> {
             let (tx, mut peer) = box_try!(PeerFsm::create(
                 store_id,
                 &self.cfg.value(),
-                &self.coprocessor_host.cfg,
+                &self.coprocessor_host.cfg.value(),
                 self.region_scheduler.clone(),
                 self.raftlog_fetch_scheduler.clone(),
                 self.engines.clone(),
@@ -1181,7 +1180,7 @@ impl<EK: KvEngine, ER: RaftEngine, T> RaftPollerBuilder<EK, ER, T> {
             let (tx, mut peer) = PeerFsm::create(
                 store_id,
                 &self.cfg.value(),
-                &self.coprocessor_host.cfg,
+                &self.coprocessor_host.cfg.value(),
                 self.region_scheduler.clone(),
                 self.raftlog_fetch_scheduler.clone(),
                 self.engines.clone(),
@@ -2195,7 +2194,7 @@ impl<'a, EK: KvEngine, ER: RaftEngine, T: Transport> StoreFsmDelegate<'a, EK, ER
         let (tx, mut peer) = PeerFsm::replicate(
             self.ctx.store_id(),
             &self.ctx.cfg,
-            &self.ctx.coprocessor_host.cfg,
+            &self.ctx.coprocessor_host.cfg.value(),
             self.ctx.region_scheduler.clone(),
             self.ctx.raftlog_fetch_scheduler.clone(),
             self.ctx.engines.clone(),
@@ -2813,7 +2812,7 @@ impl<'a, EK: KvEngine, ER: RaftEngine, T: Transport> StoreFsmDelegate<'a, EK, ER
         let (sender, mut peer) = match PeerFsm::create(
             self.ctx.store.get_id(),
             &self.ctx.cfg,
-            &self.ctx.coprocessor_host.cfg,
+            &self.ctx.coprocessor_host.cfg.value(),
             self.ctx.region_scheduler.clone(),
             self.ctx.raftlog_fetch_scheduler.clone(),
             self.ctx.engines.clone(),

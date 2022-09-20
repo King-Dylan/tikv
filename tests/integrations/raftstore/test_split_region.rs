@@ -1282,27 +1282,24 @@ fn test_gen_split_check_bucket_ranges() {
 // Test region split after config changed
 #[test]
 fn test_online_split_region_size() {
-    let count = 3;
-    let mut cluster = new_node_cluster(0, count);
+    let mut cluster = new_node_cluster(0, 1);
     cluster.cfg.coprocessor.region_max_size = Some(ReadableSize(2000));
     cluster.cfg.coprocessor.region_split_size = ReadableSize(2000);
     cluster.cfg.coprocessor.region_max_keys = Some(1000);
-    cluster.cfg.raft_store.raft_log_gc_tick_interval = ReadableDuration::secs(20);
     cluster.cfg.raft_store.raft_base_tick_interval = ReadableDuration::millis(50);
-    cluster.cfg.raft_store.split_region_check_tick_interval = ReadableDuration::millis(100);
+    cluster.cfg.raft_store.split_region_check_tick_interval = ReadableDuration::millis(10);
     cluster.cfg.raft_store.hibernate_regions = false;
-
     cluster.cfg.raft_store.raft_heartbeat_ticks = 2;
     cluster.cfg.raft_store.raft_election_timeout_ticks = 10;
-    // So the random election timeout will always be 10, which makes the case more
-    // stable.
-    cluster.cfg.raft_store.raft_min_election_timeout_ticks = 10;
-    cluster.cfg.raft_store.raft_max_election_timeout_ticks = 11;
+
     cluster.pd_client.disable_default_operator();
     cluster.run();
 
+    // Wait until region 1 executing its first split check.
+    sleep_ms(100);
+
     let pd_client = Arc::clone(&cluster.pd_client);
-    put_till_size(&mut cluster, 1000, &mut (1..));
+    put_till_size(&mut cluster, 500, &mut (1..));
     let init_region_number = pd_client.get_regions_number();
 
     let sim = cluster.sim.rl();
@@ -1323,11 +1320,11 @@ fn test_online_split_region_size() {
             Some(100)
         );
     }
-    std::thread::sleep(Duration::from_millis(10000));
+    sleep_ms(100);
     let region_number = pd_client.get_regions_number();
     assert_ne!(
         init_region_number, region_number,
-        "init_region_number value:{},region_number value:{}",
+        "init_region_number value:{}, region_number value:{}",
         init_region_number, region_number
     );
 }
