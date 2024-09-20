@@ -18,10 +18,9 @@ use backup_stream::{
     },
     observer::BackupStreamObserver,
     router::{Router, TaskSelector},
-    utils, BackupStreamResolver, Endpoint, GetCheckpointResult, RegionCheckpointOperation,
-    RegionSet, Service, Task,
+    utils, BackupStreamGrpcService, BackupStreamResolver, Endpoint, GetCheckpointResult,
+    RegionCheckpointOperation, RegionSet, Task,
 };
-use engine_rocks::RocksEngine;
 use futures::{executor::block_on, AsyncWriteExt, Future, Stream, StreamExt};
 use grpcio::{ChannelBuilder, Server, ServerBuilder};
 use kvproto::{
@@ -36,7 +35,7 @@ use raftstore::{router::CdcRaftRouter, RegionInfoAccessor};
 use resolved_ts::LeadershipResolver;
 use tempfile::TempDir;
 use test_pd_client::TestPdClient;
-use test_raftstore::{new_server_cluster, Cluster, ServerCluster};
+use test_raftstore::{new_server_cluster, Cluster, Config, ServerCluster};
 use test_util::retry;
 use tikv::config::{BackupStreamConfig, ResolvedTsConfig};
 use tikv_util::{
@@ -125,6 +124,7 @@ pub struct SuiteBuilder {
     nodes: usize,
     metastore_error: Box<dyn Fn(&str) -> Result<()> + Send + Sync>,
     cfg: Box<dyn FnOnce(&mut BackupStreamConfig)>,
+    cluster_cfg: Box<dyn FnOnce(&mut Config)>,
 }
 
 impl SuiteBuilder {
@@ -136,6 +136,7 @@ impl SuiteBuilder {
             cfg: Box::new(|cfg| {
                 cfg.enable = true;
             }),
+            cluster_cfg: Box::new(|_| {}),
         }
     }
 
@@ -163,16 +164,28 @@ impl SuiteBuilder {
         self
     }
 
+    #[allow(dead_code)]
+    pub fn cluster_cfg(mut self, f: impl FnOnce(&mut Config) + 'static) -> Self {
+        let old_f = self.cluster_cfg;
+        self.cluster_cfg = Box::new(move |cfg| {
+            old_f(cfg);
+            f(cfg);
+        });
+        self
+    }
+
     pub fn build(self) -> Suite {
         let Self {
             name: case,
             nodes: n,
             metastore_error,
             cfg: cfg_f,
+            cluster_cfg: ccfg_f,
         } = self;
 
         info!("start test"; "case" => %case, "nodes" => %n);
-        let cluster = new_server_cluster(42, n);
+        let mut cluster = new_server_cluster(42, n);
+        ccfg_f(&mut cluster.cfg);
         let mut suite = Suite {
             endpoints: Default::default(),
             meta_store: ErrorStore {
@@ -250,7 +263,7 @@ impl<S: MetaStore> MetaStore for ErrorStore<S> {
 pub struct Suite {
     pub endpoints: HashMap<u64, LazyWorker<Task>>,
     pub meta_store: ErrorStore<SlashEtcStore>,
-    pub cluster: Cluster<RocksEngine, ServerCluster<RocksEngine>>,
+    pub cluster: Cluster<ServerCluster>,
     tikv_cli: HashMap<u64, TikvClient>,
     log_backup_cli: HashMap<u64, LogBackupClient>,
     obs: HashMap<u64, BackupStreamObserver>,
@@ -258,7 +271,7 @@ pub struct Suite {
     // The place to make services live as long as suite.
     servers: Vec<Server>,
 
-    temp_files: TempDir,
+    pub temp_files: TempDir,
     pub flushed_files: TempDir,
     case_name: String,
 }
@@ -343,7 +356,7 @@ impl Suite {
             .get(&id)
             .expect("must register endpoint first");
 
-        let serv = Service::new(endpoint.scheduler());
+        let serv = BackupStreamGrpcService::new(endpoint.scheduler());
         let builder =
             ServerBuilder::new(self.env.clone()).register_service(create_log_backup(serv));
         let mut server = builder.bind("127.0.0.1", 0).build().unwrap();
@@ -391,6 +404,7 @@ impl Suite {
             cluster.pd_client.clone(),
             cm,
             BackupStreamResolver::V1(resolver),
+            sim.encryption.clone(),
         );
         worker.start(endpoint);
     }
@@ -420,7 +434,7 @@ impl Suite {
         ))
         .unwrap();
         let name = name.to_owned();
-        self.wait_with_router(move |r| block_on(r.get_task_info(&name)).is_ok())
+        self.wait_with_router(move |r| r.get_task_handler(&name).is_ok())
     }
 
     /// This function tries to calculate the global checkpoint from the flush
@@ -464,6 +478,52 @@ impl Suite {
             .await
     }
 
+    #[allow(dead_code)]
+    pub async fn write_records_batched(
+        &mut self,
+        from: usize,
+        n: usize,
+        for_table: i64,
+    ) -> HashSet<Vec<u8>> {
+        let mut inserted = HashSet::default();
+        let mut keys = HashMap::new();
+        let start_ts = self.cluster.pd_client.get_tso().await.unwrap();
+        for sn in (from..(from + n)).map(|x| x * 2) {
+            let sn = sn as u64;
+            let key = make_record_key(for_table, sn);
+            let enc_key = Key::from_raw(&key).into_encoded();
+            let region = self.cluster.get_region_id(&enc_key);
+            let v = keys.entry(region).or_insert_with(|| vec![]);
+            v.push((key, sn));
+        }
+        let commit_ts = self.cluster.pd_client.get_tso().await.unwrap();
+        for (region, keys) in keys {
+            let mut muts = vec![];
+            for (key, sn) in &keys {
+                let raw_key = make_record_key(for_table, *sn);
+                let value = if sn % 4 == 0 {
+                    Self::PROMISED_SHORT_VALUE.to_vec()
+                } else {
+                    Self::PROMISED_LONG_VALUE.to_vec()
+                };
+
+                let k = Key::from_raw(key).append_ts(commit_ts);
+                muts.push(mutation(raw_key, value));
+                inserted.insert(k.into_encoded());
+            }
+            let pk = muts[0].key.clone();
+            self.must_kv_prewrite(region, muts, pk, start_ts);
+            self.must_kv_commit(
+                region,
+                keys.into_iter().map(|(k, _)| k).collect(),
+                start_ts,
+                commit_ts,
+            );
+        }
+
+        inserted
+    }
+
     pub async fn write_records(
         &mut self,
         from: usize,
@@ -471,10 +531,10 @@ impl Suite {
         for_table: i64,
     ) -> HashSet<Vec<u8>> {
         let mut inserted = HashSet::default();
-        for ts in (from..(from + n)).map(|x| x * 2) {
-            let ts = ts as u64;
-            let key = make_record_key(for_table, ts);
-            let value = if ts % 4 == 0 {
+        for sn in (from..(from + n)).map(|x| x * 2) {
+            let sn = sn as u64;
+            let key = make_record_key(for_table, sn);
+            let value = if sn % 4 == 0 {
                 Self::PROMISED_SHORT_VALUE.to_vec()
             } else {
                 Self::PROMISED_LONG_VALUE.to_vec()
@@ -488,7 +548,7 @@ impl Suite {
             self.must_kv_commit(region, vec![key.clone()], start_ts, commit_ts);
             inserted.insert(make_encoded_record_key(
                 for_table,
-                ts,
+                sn,
                 commit_ts.into_inner(),
             ));
         }
@@ -865,9 +925,9 @@ impl Suite {
 
     pub fn wait_for_flush(&self) {
         self.wait_with_router(move |r| {
-            let task_names = block_on(r.select_task(TaskSelector::All.reference()));
+            let task_names = r.select_task(TaskSelector::All.reference());
             for task_name in task_names {
-                let tsk = block_on(r.get_task_info(&task_name));
+                let tsk = r.get_task_handler(&task_name);
                 if tsk.unwrap().is_flushing() {
                     return false;
                 }
