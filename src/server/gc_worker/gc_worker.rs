@@ -17,14 +17,14 @@ use collections::HashMap;
 use concurrency_manager::ConcurrencyManager;
 use engine_rocks::{FlowInfo, RocksEngine};
 use engine_traits::{
-    raw_ttl::ttl_current_ts, DeleteStrategy, Error as EngineError, KvEngine, MiscExt, Range,
-    WriteBatch, WriteOptions, CF_DEFAULT, CF_LOCK, CF_WRITE,
+    raw_ttl::ttl_current_ts, DeleteStrategy, Error as EngineError, ImportExt, KvEngine, MiscExt,
+    Range, WriteBatch, WriteOptions, CF_DEFAULT, CF_LOCK, CF_WRITE,
 };
 use file_system::{IoType, WithIoType};
 use futures::executor::block_on;
 use kvproto::{kvrpcpb::Context, metapb::Region};
 use pd_client::{FeatureGate, PdClient};
-use raftstore::coprocessor::RegionInfoProvider;
+use raftstore::coprocessor::{CoprocessorHost, RegionInfoProvider};
 use tikv_kv::{CfStatistics, CursorBuilder, Modify, SnapContext};
 use tikv_util::{
     config::{Tracker, VersionTrack},
@@ -192,6 +192,8 @@ pub struct GcRunnerCore<E: Engine> {
     cfg_tracker: Tracker<GcConfig>,
 
     stats_map: HashMap<GcKeyMode, Statistics>,
+
+    coprocessor_host: CoprocessorHost<E::Local>,
 }
 
 impl<E: Engine> Clone for GcRunnerCore<E> {
@@ -204,6 +206,7 @@ impl<E: Engine> Clone for GcRunnerCore<E> {
             cfg: self.cfg.clone(),
             cfg_tracker: self.cfg_tracker.clone(),
             stats_map: HashMap::default(),
+            coprocessor_host: self.coprocessor_host.clone(),
         }
     }
 }
@@ -310,6 +313,7 @@ impl<E: Engine> GcRunnerCore<E> {
         flow_info_sender: Sender<FlowInfo>,
         cfg_tracker: Tracker<GcConfig>,
         cfg: GcConfig,
+        coprocessor_host: CoprocessorHost<E::Local>,
     ) -> Self {
         let limiter = Limiter::new(if cfg.max_write_bytes_per_sec.0 > 0 {
             cfg.max_write_bytes_per_sec.0 as f64
@@ -324,6 +328,7 @@ impl<E: Engine> GcRunnerCore<E> {
             cfg,
             cfg_tracker,
             stats_map: Default::default(),
+            coprocessor_host,
         }
     }
 
@@ -738,6 +743,9 @@ impl<E: Engine> GcRunnerCore<E> {
             .send(FlowInfo::BeforeUnsafeDestroyRange(ctx.region_id))
             .unwrap();
 
+        self.coprocessor_host
+            .pre_delete_range(start_key.as_encoded(), end_key.as_encoded());
+
         // We are in single-rocksdb version if we can get a local_storage, otherwise, we
         // are in multi-rocksdb version.
         if let Some(local_storage) = self.engine.kv_engine() {
@@ -747,11 +755,14 @@ impl<E: Engine> GcRunnerCore<E> {
             let start_data_key = keys::data_key(start_key.as_encoded());
             let end_data_key = keys::data_end_key(end_key.as_encoded());
 
+            let unsafe_delete_cfs = &[CF_DEFAULT, CF_WRITE];
             let cfs = &[CF_LOCK, CF_DEFAULT, CF_WRITE];
 
             // First, use DeleteStrategy::DeleteFiles to free as much disk space as possible
+            // CF_LOCK is not proper to be handled in DeleteFiles mode because it might make
+            // some deleted locks show up again, and has risk to affect data correctness.
             let delete_files_start_time = Instant::now();
-            for cf in cfs {
+            for cf in unsafe_delete_cfs {
                 local_storage
                 .delete_ranges_cf(
                     &WriteOptions::default(),
@@ -1043,6 +1054,19 @@ impl<E: Engine> GcRunnerCore<E> {
                 id,
                 region_info_provider,
             } => {
+                let smallest_key = wb.smallest_key.as_ref().unwrap().as_encoded().as_slice();
+                let largest_key = wb.largest_key.as_ref().unwrap().as_encoded().as_slice();
+                // unwrap() is safe as None only occurs in multi-rocksdb version.
+                let kv_engine = self.engine.kv_engine().unwrap();
+                // Acquire latch to prevent concurrency with ingestion operations
+                // using RocksDB IngestExternalFileOptions.allow_write = true.
+                let _ingest_latch_guard = kv_engine.acquire_ingest_latch(Range {
+                    start_key: smallest_key,
+                    end_key: keys::next_key(largest_key).as_slice(),
+                });
+
+                fail_point!("after_gc_orphan_versions_ingest_latch_acquired");
+
                 let count = wb.count();
                 match wb.batch {
                     Either::Left(mut wb) => {
@@ -1079,9 +1103,17 @@ impl<E: Engine> GcRunner<E> {
         cfg_tracker: Tracker<GcConfig>,
         cfg: GcConfig,
         pool: Remote<TaskCell>,
+        coprocessor_host: CoprocessorHost<E::Local>,
     ) -> Self {
         Self {
-            inner: GcRunnerCore::new(store_id, engine, flow_info_sender, cfg_tracker, cfg),
+            inner: GcRunnerCore::new(
+                store_id,
+                engine,
+                flow_info_sender,
+                cfg_tracker,
+                cfg,
+                coprocessor_host,
+            ),
             pool,
         }
     }
@@ -1281,7 +1313,11 @@ impl<E: Engine> GcWorker<E> {
         }
     }
 
-    pub fn start(&mut self, store_id: u64) -> Result<()> {
+    pub fn start(
+        &mut self,
+        store_id: u64,
+        coprocessor_host: CoprocessorHost<E::Local>,
+    ) -> Result<()> {
         let mut worker = self.worker.lock().unwrap();
         let runner = GcRunner::new(
             store_id,
@@ -1293,6 +1329,7 @@ impl<E: Engine> GcWorker<E> {
                 .tracker("gc-worker".to_owned()),
             self.config_manager.value().clone(),
             worker.remote(),
+            coprocessor_host,
         );
         worker.start(runner);
 
@@ -1546,11 +1583,10 @@ pub mod test_gc_worker {
 
 #[cfg(test)]
 mod tests {
-
     use std::{
         collections::{BTreeMap, BTreeSet},
         path::Path,
-        sync::mpsc,
+        sync::{atomic::AtomicBool, mpsc},
         thread,
         time::Duration,
     };
@@ -1718,7 +1754,8 @@ mod tests {
             gate,
             Arc::new(MockRegionInfoProvider::new(vec![region1, region2])),
         );
-        gc_worker.start(store_id).unwrap();
+        let coprocessor_host = CoprocessorHost::default();
+        gc_worker.start(store_id, coprocessor_host).unwrap();
         // Convert keys to key value pairs, where the value is "value-{key}".
         let data: BTreeMap<_, _> = init_keys
             .iter()
@@ -1885,7 +1922,7 @@ mod tests {
 
         let sp_provider = MockSafePointProvider(200);
         let mut host = CoprocessorHost::<RocksEngine>::default();
-        let ri_provider = RegionInfoAccessor::new(&mut host, Arc::new(|| false), 0);
+        let ri_provider = RegionInfoAccessor::new(&mut host, Arc::new(|| false), Box::new(|| 0));
 
         let mut gc_config = GcConfig::default();
         gc_config.num_threads = 2;
@@ -1896,7 +1933,8 @@ mod tests {
             feature_gate,
             Arc::new(ri_provider.clone()),
         );
-        gc_worker.start(store_id).unwrap();
+        let coprocessor_host = CoprocessorHost::default();
+        gc_worker.start(store_id, coprocessor_host).unwrap();
 
         let mut r1 = Region::default();
         r1.set_id(1);
@@ -1981,6 +2019,7 @@ mod tests {
 
         let (tx, _rx) = mpsc::channel();
         let cfg = GcConfig::default();
+        let coprocessor_host = CoprocessorHost::default();
         let mut runner = GcRunnerCore::new(
             store_id,
             prefixed_engine.clone(),
@@ -1989,6 +2028,7 @@ mod tests {
                 .0
                 .tracker("gc-worker".to_owned()),
             cfg,
+            coprocessor_host,
         );
 
         let mut r1 = Region::default();
@@ -2000,7 +2040,7 @@ mod tests {
         r1.mut_peers()[0].set_store_id(store_id);
 
         let mut host = CoprocessorHost::<RocksEngine>::default();
-        let ri_provider = RegionInfoAccessor::new(&mut host, Arc::new(|| false), 0);
+        let ri_provider = RegionInfoAccessor::new(&mut host, Arc::new(|| false), Box::new(|| 0));
         host.on_region_changed(&r1, RegionChangeEvent::Create, StateRole::Leader);
 
         let db = engine.kv_engine().unwrap().as_inner().clone();
@@ -2045,6 +2085,7 @@ mod tests {
 
         let (tx, _rx) = mpsc::channel();
         let cfg = GcConfig::default();
+        let coprocessor_host = CoprocessorHost::default();
         let mut runner = GcRunnerCore::new(
             store_id,
             prefixed_engine.clone(),
@@ -2053,6 +2094,7 @@ mod tests {
                 .0
                 .tracker("gc-worker".to_owned()),
             cfg,
+            coprocessor_host,
         );
 
         let mut r1 = Region::default();
@@ -2064,7 +2106,11 @@ mod tests {
         r1.mut_peers()[0].set_store_id(store_id);
 
         let mut host = CoprocessorHost::<RocksEngine>::default();
-        let ri_provider = Arc::new(RegionInfoAccessor::new(&mut host, Arc::new(|| false), 0));
+        let ri_provider = Arc::new(RegionInfoAccessor::new(
+            &mut host,
+            Arc::new(|| false),
+            Box::new(|| 0),
+        ));
         host.on_region_changed(&r1, RegionChangeEvent::Create, StateRole::Leader);
         // Init env end...
 
@@ -2146,6 +2192,7 @@ mod tests {
 
         let (tx, _rx) = mpsc::channel();
         let cfg = GcConfig::default();
+        let coprocessor_host = CoprocessorHost::default();
         let mut runner = GcRunnerCore::new(
             1,
             prefixed_engine.clone(),
@@ -2154,6 +2201,7 @@ mod tests {
                 .0
                 .tracker("gc-worker".to_owned()),
             cfg,
+            coprocessor_host,
         );
 
         let mut r1 = Region::default();
@@ -2165,7 +2213,11 @@ mod tests {
         r1.mut_peers()[0].set_store_id(1);
 
         let mut host = CoprocessorHost::<RocksEngine>::default();
-        let ri_provider = Arc::new(RegionInfoAccessor::new(&mut host, Arc::new(|| false), 0));
+        let ri_provider = Arc::new(RegionInfoAccessor::new(
+            &mut host,
+            Arc::new(|| false),
+            Box::new(|| 0),
+        ));
         host.on_region_changed(&r1, RegionChangeEvent::Create, StateRole::Leader);
 
         let db = engine.kv_engine().unwrap().as_inner().clone();
@@ -2329,7 +2381,8 @@ mod tests {
             )
             .unwrap();
 
-        gc_worker.start(store_id).unwrap();
+        let coprocessor_host = CoprocessorHost::default();
+        gc_worker.start(store_id, coprocessor_host).unwrap();
 
         // After the worker starts running, the destroy range task should run,
         // and the key in the range will be deleted.
@@ -2466,6 +2519,7 @@ mod tests {
         ]));
 
         let cfg = GcConfig::default();
+        let coprocessor_host = CoprocessorHost::default();
         let gc_runner = GcRunnerCore::new(
             store_id,
             engine.clone(),
@@ -2474,6 +2528,7 @@ mod tests {
                 .0
                 .tracker("gc-worker".to_owned()),
             cfg,
+            coprocessor_host,
         );
 
         let mut region_id = 0;
@@ -2644,6 +2699,7 @@ mod tests {
         let ri_provider = Arc::new(MockRegionInfoProvider::new(vec![r1, r2]));
 
         let cfg = GcConfig::default();
+        let coprocessor_host = CoprocessorHost::default();
         let mut gc_runner = GcRunnerCore::new(
             store_id,
             engine.clone(),
@@ -2652,6 +2708,7 @@ mod tests {
                 .0
                 .tracker("gc-worker".to_owned()),
             cfg,
+            coprocessor_host,
         );
 
         // region_id -> vec<(key,expir_ts,is_delete,expect_exist)>
@@ -2864,5 +2921,129 @@ mod tests {
         cfg_manager.dispatch(config_change).unwrap();
 
         assert_eq!(gc_worker.get_worker_thread_count(), 2);
+    }
+
+    // This test verifies that the GcOrphanVersions task is blocked by concurrent
+    // ingest operations.
+    #[test]
+    fn test_gc_orphan_version_blocked_by_ingest() {
+        let store_id = 1;
+        let engine = TestEngineBuilder::new().build().unwrap();
+        let prefixed_engine = PrefixedEngine(engine.clone());
+        let (tx, _rx) = mpsc::channel();
+        let cfg = GcConfig::default();
+        let coprocessor_host = CoprocessorHost::default();
+        let mut runner = GcRunnerCore::new(
+            store_id,
+            prefixed_engine.clone(),
+            tx,
+            GcWorkerConfigManager(Arc::new(VersionTrack::new(cfg.clone())), None)
+                .0
+                .tracker("gc-worker".to_owned()),
+            cfg,
+            coprocessor_host,
+        );
+
+        let kv_engine = engine.kv_engine().unwrap();
+        let _ingest_latch_guard = kv_engine.acquire_ingest_latch(Range {
+            start_key: b"a",
+            end_key: b"b",
+        });
+
+        let gc_task_completed = Arc::new(AtomicBool::new(false));
+        let gc_task_completed_clone = gc_task_completed.clone();
+        let gc_handle = thread::spawn(move || {
+            let mut wb = DeleteBatch::new(&Some(engine.kv_engine().unwrap()));
+            wb.delete(b"a", 100_u64.into()).unwrap();
+            wb.delete(b"b", 101_u64.into()).unwrap();
+            let region_info_provider = Arc::new(MockRegionInfoProvider::new(vec![]));
+            let task = GcTask::OrphanVersions {
+                wb,
+                region_info_provider,
+                id: 0,
+            };
+            runner.run(task);
+            gc_task_completed_clone.store(true, Ordering::SeqCst);
+        });
+
+        thread::sleep(Duration::from_millis(500));
+        // The GC task must remain pending as _ingest_latch_guard is holding the latch.
+        assert!(
+            !gc_task_completed.load(Ordering::SeqCst),
+            "GC task completed before dropping the guard"
+        );
+        drop(_ingest_latch_guard);
+        gc_handle.join().expect("Gc thread panicked");
+        // The GC task must have finished as _ingest_latch_guard has released the latch.
+        assert!(
+            gc_task_completed.load(Ordering::SeqCst),
+            "GC task did not complete as expected"
+        );
+    }
+
+    // This test verifies that the GcOrphanVersions task blocks the ingest
+    // operation.
+    #[cfg(feature = "failpoints")]
+    #[test]
+    fn test_gc_orphan_version_blocks_ingest() {
+        let store_id = 1;
+        let engine = TestEngineBuilder::new().build().unwrap();
+        let prefixed_engine = PrefixedEngine(engine.clone());
+        let (tx, _rx) = mpsc::channel();
+        let cfg = GcConfig::default();
+        let coprocessor_host = CoprocessorHost::default();
+        let mut runner = GcRunnerCore::new(
+            store_id,
+            prefixed_engine.clone(),
+            tx,
+            GcWorkerConfigManager(Arc::new(VersionTrack::new(cfg.clone())), None)
+                .0
+                .tracker("gc-worker".to_owned()),
+            cfg,
+            coprocessor_host,
+        );
+
+        let engine_clone = engine.clone();
+        let gc_handle = thread::spawn(move || {
+            fail::cfg("after_gc_orphan_versions_ingest_latch_acquired", "pause").unwrap();
+            let mut wb = DeleteBatch::new(&Some(engine_clone.kv_engine().unwrap()));
+            wb.delete(b"a", 100_u64.into()).unwrap();
+            wb.delete(b"b", 101_u64.into()).unwrap();
+            let region_info_provider = Arc::new(MockRegionInfoProvider::new(vec![]));
+            let task = GcTask::OrphanVersions {
+                wb,
+                region_info_provider,
+                id: 0,
+            };
+            runner.run(task);
+        });
+
+        // Wait gc_handle to start.
+        thread::sleep(Duration::from_millis(500));
+        let ingest_task_completed = Arc::new(AtomicBool::new(false));
+        let ingest_task_completed_clone = ingest_task_completed.clone();
+        let ingest_handle = thread::spawn(move || {
+            let kv_engine = engine.kv_engine().unwrap();
+            let _ingest_latch_guard = kv_engine.acquire_ingest_latch(Range {
+                start_key: b"a",
+                end_key: b"b",
+            });
+            ingest_task_completed_clone.store(true, Ordering::SeqCst);
+        });
+        thread::sleep(Duration::from_millis(500));
+        // The ingest task must remain pending as _gc_latch_guard is holding the latch.
+        assert!(
+            !ingest_task_completed.load(Ordering::SeqCst),
+            "Ingest task completed before dropping the GC latch guard"
+        );
+        fail::remove("after_gc_orphan_versions_ingest_latch_acquired");
+        thread::sleep(Duration::from_millis(500));
+        gc_handle.join().expect("Gc thread panicked");
+        ingest_handle.join().expect("Ingest thread panicked");
+        // The ingest task must have finished as _gc_latch_guard has released the latch.
+        assert!(
+            ingest_task_completed.load(Ordering::SeqCst),
+            "Ingest task did not complete as expected"
+        );
     }
 }

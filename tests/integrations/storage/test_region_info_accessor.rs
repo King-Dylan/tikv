@@ -1,7 +1,6 @@
 // Copyright 2018 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
-    collections::BTreeSet,
     num::NonZeroUsize,
     sync::{mpsc::channel, Arc},
     thread,
@@ -78,7 +77,7 @@ fn test_region_collection_seek_region() {
         .sim
         .wl()
         .post_create_coprocessor_host(Box::new(move |id, host| {
-            let p = RegionInfoAccessor::new(host, Arc::new(|| false), 0);
+            let p = RegionInfoAccessor::new(host, Arc::new(|| false), Box::new(|| 0));
             tx.send((id, p)).unwrap()
         }));
 
@@ -152,7 +151,7 @@ fn test_region_collection_get_regions_in_range() {
         .sim
         .wl()
         .post_create_coprocessor_host(Box::new(move |id, host| {
-            let p = RegionInfoAccessor::new(host, Arc::new(|| false), 0);
+            let p = RegionInfoAccessor::new(host, Arc::new(|| false), Box::new(|| 0));
             tx.send((id, p)).unwrap()
         }));
 
@@ -197,7 +196,7 @@ fn test_region_collection_get_top_regions() {
         .sim
         .wl()
         .post_create_coprocessor_host(Box::new(move |id, host| {
-            let p = RegionInfoAccessor::new(host, Arc::new(|| true), 0);
+            let p = RegionInfoAccessor::new(host, Arc::new(|| true), Box::new(|| 0));
             tx.send((id, p)).unwrap()
         }));
     cluster.run();
@@ -206,7 +205,6 @@ fn test_region_collection_get_top_regions() {
     let regions = prepare_cluster(&mut cluster);
     let mut region_ids = regions.iter().map(|r| r.get_id()).collect::<Vec<_>>();
     region_ids.sort();
-    let mut all_results = BTreeSet::<u64>::new();
     for node_id in cluster.get_node_ids() {
         let engine = &region_info_providers[&node_id];
         for r in &regions {
@@ -221,7 +219,7 @@ fn test_region_collection_get_top_regions() {
         }
 
         let result = engine
-            .get_top_regions(NonZeroUsize::new(10))
+            .get_top_regions(NonZeroUsize::new(10).unwrap())
             .unwrap()
             .into_iter()
             .map(|(r, _)| r.get_id())
@@ -236,16 +234,7 @@ fn test_region_collection_get_top_regions() {
             assert_gt!(len, 0);
             assert_le!(len, 10);
         }
-        // All the regions for which this node is the leader.
-        let result = engine
-            .get_top_regions(None)
-            .unwrap()
-            .into_iter()
-            .map(|(r, _)| r.get_id())
-            .collect::<Vec<_>>();
-        all_results.extend(result.iter());
     }
-    assert_eq!(all_results.into_iter().collect::<Vec<_>>(), region_ids);
 
     for (_, p) in region_info_providers {
         p.stop();
@@ -261,7 +250,7 @@ fn test_region_collection_find_region_by_key() {
         .sim
         .wl()
         .post_create_coprocessor_host(Box::new(move |id, host| {
-            let p = RegionInfoAccessor::new(host, Arc::new(|| false), 0);
+            let p = RegionInfoAccessor::new(host, Arc::new(|| false), Box::new(|| 0));
             tx.send((id, p)).unwrap()
         }));
 

@@ -23,15 +23,15 @@ use std::{
 };
 
 use batch_system::{
-    BasicMailbox, BatchRouter, BatchSystem, Config as BatchSystemConfig, Fsm, HandleResult,
-    HandlerBuilder, PollHandler, Priority,
+    BasicMailbox, BatchRouter, BatchSystem, Config as BatchSystemConfig, Fsm, FsmType,
+    HandleResult, HandlerBuilder, PollHandler, Priority,
 };
 use collections::{HashMap, HashMapEntry, HashSet};
 use crossbeam::channel::{TryRecvError, TrySendError};
 use engine_traits::{
-    util::SequenceNumber, CacheRegion, DeleteStrategy, KvEngine, Mutable, PerfContext,
-    PerfContextKind, RaftEngine, RaftEngineReadOnly, Range as EngineRange, Snapshot, SstMetaInfo,
-    WriteBatch, WriteOptions, ALL_CFS, CF_DEFAULT, CF_LOCK, CF_RAFT, CF_WRITE,
+    util::SequenceNumber, DeleteStrategy, KvEngine, Mutable, PerfContext, PerfContextKind,
+    RaftEngine, RaftEngineReadOnly, Range as EngineRange, Snapshot, SstMetaInfo, WriteBatch,
+    WriteOptions, ALL_CFS, CF_DEFAULT, CF_LOCK, CF_RAFT, CF_WRITE,
 };
 use fail::fail_point;
 use health_controller::types::LatencyInspector;
@@ -95,7 +95,7 @@ use crate::{
             self, admin_cmd_epoch_lookup, check_flashback_state, check_req_region_epoch,
             compare_region_epoch, ChangePeerI, ConfChangeKind, KeysInfoFormatter,
         },
-        Config, RegionSnapshot, RegionTask, WriteCallback,
+        Config, RegionSnapshot, SnapGenTask, WriteCallback,
     },
     Error, Result,
 };
@@ -397,7 +397,7 @@ where
     timer: Option<Instant>,
     host: CoprocessorHost<EK>,
     importer: Arc<SstImporter<EK>>,
-    region_scheduler: Scheduler<RegionTask<EK::Snapshot>>,
+    snap_gen_scheduler: Scheduler<SnapGenTask<EK::Snapshot>>,
     router: ApplyRouter<EK>,
     notifier: Box<dyn Notifier<EK>>,
     engine: EK,
@@ -454,6 +454,7 @@ where
     /// The pending inspector should be cleaned at the end of a write.
     pending_latency_inspect: Vec<LatencyInspector>,
     apply_wait: LocalHistogram,
+    apply_msg_len: LocalHistogram,
     apply_time: LocalHistogram,
     key_size: LocalHistogram,
     value_size: LocalHistogram,
@@ -482,7 +483,7 @@ where
         tag: String,
         host: CoprocessorHost<EK>,
         importer: Arc<SstImporter<EK>>,
-        region_scheduler: Scheduler<RegionTask<EK::Snapshot>>,
+        snap_gen_scheduler: Scheduler<SnapGenTask<EK::Snapshot>>,
         engine: EK,
         router: ApplyRouter<EK>,
         notifier: Box<dyn Notifier<EK>>,
@@ -499,7 +500,7 @@ where
             timer: None,
             host,
             importer,
-            region_scheduler,
+            snap_gen_scheduler,
             engine,
             router,
             notifier,
@@ -525,6 +526,7 @@ where
             pending_ssts: vec![],
             pending_latency_inspect: vec![],
             apply_wait: APPLY_TASK_WAIT_TIME_HISTOGRAM.local(),
+            apply_msg_len: APPLY_MSG_LEN.local(),
             apply_time: APPLY_TIME_HISTOGRAM.local(),
             key_size: STORE_APPLY_KEY_SIZE_HISTOGRAM.local(),
             value_size: STORE_APPLY_VALUE_SIZE_HISTOGRAM.local(),
@@ -543,8 +545,7 @@ where
     pub fn prepare_for(&mut self, delegate: &mut ApplyDelegate<EK>) {
         self.applied_batch
             .push_batch(&delegate.observe_info, delegate.region.get_id());
-        let cache_region = CacheRegion::from_region(&delegate.region);
-        self.kv_wb.prepare_for_region(cache_region);
+        self.kv_wb.prepare_for_region(&delegate.region);
     }
 
     /// Commits all changes have done for delegate. `persistent` indicates
@@ -630,6 +631,16 @@ where
             }
             self.kv_wb_last_bytes = 0;
             self.kv_wb_last_keys = 0;
+        } else {
+            fail_point!(
+                "after_write_to_db_skip_write_node_1",
+                self.store_id == 1,
+                |_| { unreachable!() }
+            );
+            // We call `clear` here because some WriteBatch impl may have some internal
+            // state that need to be reset even if the write batch is empty.
+            // Please refer to `RegionCacheWriteBatch::clear` for more details.
+            self.kv_wb_mut().clear();
         }
         if !self.delete_ssts.is_empty() {
             let tag = self.tag.clone();
@@ -2321,6 +2332,17 @@ where
         request: &AdminRequest,
     ) -> Result<(AdminResponse, ApplyResult<EK::Snapshot>)> {
         assert!(request.has_change_peer_v2());
+        fail_point!(
+            "apply_on_conf_change_1_1",
+            self.id() == 1 && self.region_id() == 1,
+            |_| unreachable!()
+        );
+        fail_point!(
+            "apply_on_conf_change_3_1",
+            self.id() == 3 && self.region_id() == 1,
+            |_| unreachable!()
+        );
+
         let changes = request.get_change_peer_v2().get_change_peers().to_vec();
 
         info!(
@@ -2574,6 +2596,11 @@ where
         req: &AdminRequest,
     ) -> Result<(AdminResponse, ApplyResult<EK::Snapshot>)> {
         fail_point!("apply_before_split");
+        fail_point!(
+            "apply_before_split_1_1",
+            self.id() == 1 && self.region_id() == 1,
+            |_| { unreachable!() }
+        );
         fail_point!(
             "apply_before_split_1_3",
             self.id() == 3 && self.region_id() == 1,
@@ -3700,14 +3727,14 @@ impl GenSnapTask {
         kv_snap: EK::Snapshot,
         last_applied_term: u64,
         last_applied_state: RaftApplyState,
-        region_sched: &Scheduler<RegionTask<EK::Snapshot>>,
+        snap_gen_sched: &Scheduler<SnapGenTask<EK::Snapshot>>,
     ) -> Result<()>
     where
         EK: KvEngine,
     {
         self.index
             .store(last_applied_state.applied_index, Ordering::SeqCst);
-        let snapshot = RegionTask::Gen {
+        let snapshot = SnapGenTask::Gen {
             region_id: self.region_id,
             notifier: self.snap_notifier,
             for_balance: self.for_balance,
@@ -3719,7 +3746,7 @@ impl GenSnapTask {
             kv_snap,
             to_store_id: self.to_peer.store_id,
         };
-        box_try!(region_sched.schedule(snapshot));
+        box_try!(snap_gen_sched.schedule(snapshot));
         Ok(())
     }
 }
@@ -3809,6 +3836,11 @@ where
         region_id: u64,
         term: u64,
         compact_index: u64,
+    },
+    // Trigger loading pending region for in_memory_engine,
+    InMemoryEngineLoadRegion {
+        region_id: u64,
+        trigger_load_cb: Box<dyn FnOnce(&Region) + Send + 'static>,
     },
 }
 
@@ -3910,6 +3942,9 @@ where
                     "[region {}] force compact, term: {} compact_index: {}",
                     region_id, term, compact_index
                 )
+            }
+            Msg::InMemoryEngineLoadRegion { region_id, .. } => {
+                write!(f, "[region {}] try load in memory cache", region_id)
             }
         }
     }
@@ -4266,7 +4301,7 @@ where
             apply_ctx.engine.snapshot(),
             self.delegate.applied_term,
             self.delegate.apply_state.clone(),
-            &apply_ctx.region_scheduler,
+            &apply_ctx.snap_gen_scheduler,
         ) {
             error!(
                 "schedule snapshot failed";
@@ -4431,6 +4466,7 @@ where
 
     #[allow(clippy::vec_box)]
     fn handle_tasks(&mut self, apply_ctx: &mut ApplyContext<EK>, msgs: &mut Vec<Box<Msg<EK>>>) {
+        apply_ctx.apply_msg_len.observe(msgs.len() as f64);
         let mut drainer = msgs.drain(..);
         let mut batch_apply = None;
         loop {
@@ -4525,6 +4561,12 @@ where
                 } => {
                     self.unsafe_force_compact(apply_ctx, term, compact_index);
                 }
+                Msg::InMemoryEngineLoadRegion {
+                    trigger_load_cb, ..
+                } => {
+                    trigger_load_cb(&self.delegate.region);
+                    fail_point!("on_apply_in_memory_engine_load_region");
+                }
             }
         }
     }
@@ -4535,6 +4577,8 @@ where
     EK: KvEngine,
 {
     type Message = Box<Msg<EK>>;
+
+    const FSM_TYPE: FsmType = FsmType::apply;
 
     #[inline]
     fn is_stopped(&self) -> bool {
@@ -4631,6 +4675,8 @@ impl ControlFsm {
 impl Fsm for ControlFsm {
     type Message = ControlMsg;
 
+    const FSM_TYPE: FsmType = FsmType::apply;
+
     #[inline]
     fn is_stopped(&self) -> bool {
         self.stopped
@@ -4707,6 +4753,7 @@ where
             }
             handle_result = HandleResult::KeepProcessing;
         }
+        fail_point!("before_handle_normal");
         fail_point!("before_handle_normal_3", normal.delegate.id() == 3, |_| {
             HandleResult::KeepProcessing
         });
@@ -4762,7 +4809,7 @@ pub struct Builder<EK: KvEngine> {
     cfg: Arc<VersionTrack<Config>>,
     coprocessor_host: CoprocessorHost<EK>,
     importer: Arc<SstImporter<EK>>,
-    region_scheduler: Scheduler<RegionTask<<EK as KvEngine>::Snapshot>>,
+    snap_gen_scheduler: Scheduler<SnapGenTask<EK::Snapshot>>,
     engine: EK,
     sender: Box<dyn Notifier<EK>>,
     router: ApplyRouter<EK>,
@@ -4781,7 +4828,7 @@ impl<EK: KvEngine> Builder<EK> {
             cfg: builder.cfg.clone(),
             coprocessor_host: builder.coprocessor_host.clone(),
             importer: builder.importer.clone(),
-            region_scheduler: builder.region_scheduler.clone(),
+            snap_gen_scheduler: builder.snap_gen_scheduler.clone(),
             engine: builder.engines.kv.clone(),
             sender,
             router,
@@ -4805,7 +4852,7 @@ where
                 self.tag.clone(),
                 self.coprocessor_host.clone(),
                 self.importer.clone(),
-                self.region_scheduler.clone(),
+                self.snap_gen_scheduler.clone(),
                 self.engine.clone(),
                 self.router.clone(),
                 self.sender.clone_box(),
@@ -4831,7 +4878,7 @@ where
             cfg: self.cfg.clone(),
             coprocessor_host: self.coprocessor_host.clone(),
             importer: self.importer.clone(),
-            region_scheduler: self.region_scheduler.clone(),
+            snap_gen_scheduler: self.snap_gen_scheduler.clone(),
             engine: self.engine.clone(),
             sender: self.sender.clone_box(),
             router: self.router.clone(),
@@ -4954,6 +5001,11 @@ where
                 Msg::UnsafeForceCompact { region_id, .. } => {
                     info!("skip force compact because target region is not found";
                             "region_id" => region_id);
+                    return;
+                }
+                Msg::InMemoryEngineLoadRegion { region_id, .. } => {
+                    info!("skip check load in memory region cache because target region is not found";
+                        "region_id" => region_id);
                     return;
                 }
             },
@@ -5096,6 +5148,7 @@ mod memtrace {
                 Msg::Recover(..) => 0,
                 Msg::CheckCompact { .. } => 0,
                 Msg::UnsafeForceCompact { .. } => 0,
+                Msg::InMemoryEngineLoadRegion { .. } => 0,
             }
         }
     }
@@ -5150,7 +5203,7 @@ mod tests {
             msg::WriteResponse,
             peer_storage::RAFT_INIT_LOG_INDEX,
             simple_write::{SimpleWriteEncoder, SimpleWriteReqEncoder},
-            Config, RegionTask,
+            Config, SnapGenTask,
         },
     };
 
@@ -5473,7 +5526,7 @@ mod tests {
         let sender = Box::new(TestNotifier { tx });
         let (_tmp, engine) = create_tmp_engine("apply-basic");
         let (_dir, importer) = create_tmp_importer("apply-basic");
-        let (region_scheduler, mut snapshot_rx) = dummy_scheduler();
+        let (snap_gen_scheduler, mut snapshot_rx) = dummy_scheduler();
         let cfg = Arc::new(VersionTrack::new(Config::default()));
         let (router, mut system) = create_apply_batch_system(&cfg.value(), None);
         let pending_create_peers = Arc::new(Mutex::new(HashMap::default()));
@@ -5482,7 +5535,7 @@ mod tests {
             cfg,
             coprocessor_host: CoprocessorHost::<KvTestEngine>::default(),
             importer,
-            region_scheduler,
+            snap_gen_scheduler,
             sender,
             engine,
             router: router.clone(),
@@ -5575,7 +5628,7 @@ mod tests {
         };
         let apply_state_key = keys::apply_state_key(2);
         let apply_state = match snapshot_rx.recv_timeout(Duration::from_secs(3)) {
-            Ok(Some(RegionTask::Gen { kv_snap, .. })) => kv_snap
+            Ok(Some(SnapGenTask::Gen { kv_snap, .. })) => kv_snap
                 .get_msg_cf(CF_RAFT, &apply_state_key)
                 .unwrap()
                 .unwrap(),
@@ -6042,7 +6095,7 @@ mod tests {
             .register_query_observer(1, BoxQueryObserver::new(obs.clone()));
 
         let (tx, rx) = mpsc::channel();
-        let (region_scheduler, _) = dummy_scheduler();
+        let (snap_gen_scheduler, _) = dummy_scheduler();
         let sender = Box::new(TestNotifier { tx });
         let cfg = Arc::new(VersionTrack::new(Config::default()));
         let (router, mut system) = create_apply_batch_system(&cfg.value(), None);
@@ -6051,7 +6104,7 @@ mod tests {
             tag: "test-store".to_owned(),
             cfg,
             sender,
-            region_scheduler,
+            snap_gen_scheduler,
             coprocessor_host: host,
             importer: importer.clone(),
             engine: engine.clone(),
@@ -6381,7 +6434,7 @@ mod tests {
             .register_query_observer(1, BoxQueryObserver::new(obs.clone()));
 
         let (tx, rx) = mpsc::channel();
-        let (region_scheduler, _) = dummy_scheduler();
+        let (snap_gen_scheduler, _) = dummy_scheduler();
         let sender = Box::new(TestNotifier { tx });
         let mut config = Config::default();
         config.enable_v2_compatible_learner = true;
@@ -6392,7 +6445,7 @@ mod tests {
             tag: "test-store".to_owned(),
             cfg,
             sender,
-            region_scheduler,
+            snap_gen_scheduler,
             coprocessor_host: host,
             importer: importer.clone(),
             engine: engine.clone(),
@@ -6726,7 +6779,7 @@ mod tests {
             .register_query_observer(1, BoxQueryObserver::new(obs));
 
         let (tx, rx) = mpsc::channel();
-        let (region_scheduler, _) = dummy_scheduler();
+        let (snap_gen_scheduler, _) = dummy_scheduler();
         let sender = Box::new(TestNotifier { tx });
         let cfg = Arc::new(VersionTrack::new(Config::default()));
         let (router, mut system) = create_apply_batch_system(&cfg.value(), None);
@@ -6735,7 +6788,7 @@ mod tests {
             tag: "test-store".to_owned(),
             cfg: cfg.clone(),
             sender,
-            region_scheduler,
+            snap_gen_scheduler,
             coprocessor_host: host,
             importer,
             engine,
@@ -6812,7 +6865,7 @@ mod tests {
             .register_query_observer(1, BoxQueryObserver::new(obs));
 
         let (tx, rx) = mpsc::channel();
-        let (region_scheduler, _) = dummy_scheduler();
+        let (snap_gen_scheduler, _) = dummy_scheduler();
         let sender = Box::new(TestNotifier { tx });
         let cfg = {
             let mut cfg = Config::default();
@@ -6826,7 +6879,7 @@ mod tests {
             tag: "test-store".to_owned(),
             cfg,
             sender,
-            region_scheduler,
+            snap_gen_scheduler,
             coprocessor_host: host,
             importer: importer.clone(),
             engine: engine.clone(),
@@ -6995,7 +7048,7 @@ mod tests {
             .register_query_observer(1, BoxQueryObserver::new(obs));
 
         let (tx, rx) = mpsc::channel();
-        let (region_scheduler, _) = dummy_scheduler();
+        let (snap_gen_scheduler, _) = dummy_scheduler();
         let sender = Box::new(TestNotifier { tx });
         let cfg = {
             let mut cfg = Config::default();
@@ -7009,7 +7062,7 @@ mod tests {
             tag: "test-store".to_owned(),
             cfg,
             sender,
-            region_scheduler,
+            snap_gen_scheduler,
             coprocessor_host: host,
             importer,
             engine,
@@ -7093,7 +7146,7 @@ mod tests {
             .register_query_observer(1, BoxQueryObserver::new(obs.clone()));
 
         let (tx, rx) = mpsc::channel();
-        let (region_scheduler, _) = dummy_scheduler();
+        let (snap_gen_scheduler, _) = dummy_scheduler();
         let sender = Box::new(TestNotifier { tx });
         let cfg = Config::default();
         let (router, mut system) = create_apply_batch_system(&cfg, None);
@@ -7102,7 +7155,7 @@ mod tests {
             tag: "test-exec-observer".to_owned(),
             cfg: Arc::new(VersionTrack::new(cfg)),
             sender,
-            region_scheduler,
+            snap_gen_scheduler,
             coprocessor_host: host,
             importer: importer.clone(),
             engine: engine.clone(),
@@ -7318,7 +7371,7 @@ mod tests {
             .register_cmd_observer(1, BoxCmdObserver::new(obs));
 
         let (tx, rx) = mpsc::channel();
-        let (region_scheduler, _) = dummy_scheduler();
+        let (snap_gen_scheduler, _) = dummy_scheduler();
         let sender = Box::new(TestNotifier { tx });
         let cfg = Config::default();
         let (router, mut system) = create_apply_batch_system(&cfg, None);
@@ -7327,7 +7380,7 @@ mod tests {
             tag: "test-store".to_owned(),
             cfg: Arc::new(VersionTrack::new(cfg)),
             sender,
-            region_scheduler,
+            snap_gen_scheduler,
             coprocessor_host: host,
             importer,
             engine,
@@ -7599,7 +7652,7 @@ mod tests {
         obs.cmd_sink = Some(Arc::new(Mutex::new(sink)));
         host.registry
             .register_cmd_observer(1, BoxCmdObserver::new(obs));
-        let (region_scheduler, _) = dummy_scheduler();
+        let (snap_gen_scheduler, _) = dummy_scheduler();
         let cfg = Arc::new(VersionTrack::new(Config::default()));
         let (router, mut system) = create_apply_batch_system(&cfg.value(), None);
         let pending_create_peers = Arc::new(Mutex::new(HashMap::default()));
@@ -7608,7 +7661,7 @@ mod tests {
             cfg,
             sender,
             importer,
-            region_scheduler,
+            snap_gen_scheduler,
             coprocessor_host: host,
             engine: engine.clone(),
             router: router.clone(),
@@ -7819,7 +7872,7 @@ mod tests {
         let (tx, apply_res_rx) = mpsc::channel();
         let sender = Box::new(TestNotifier { tx });
         let coprocessor_host = CoprocessorHost::<KvTestEngine>::default();
-        let (region_scheduler, _) = dummy_scheduler();
+        let (snap_gen_scheduler, _) = dummy_scheduler();
         let cfg = Arc::new(VersionTrack::new(Config::default()));
         let (router, mut system) = create_apply_batch_system(&cfg.value(), None);
         let pending_create_peers = Arc::new(Mutex::new(HashMap::default()));
@@ -7828,7 +7881,7 @@ mod tests {
             cfg,
             sender,
             importer,
-            region_scheduler,
+            snap_gen_scheduler,
             coprocessor_host,
             engine: engine.clone(),
             router: router.clone(),
@@ -7943,7 +7996,7 @@ mod tests {
             .register_query_observer(1, BoxQueryObserver::new(ApplyObserver::default()));
 
         let (tx, rx) = mpsc::channel();
-        let (region_scheduler, _) = dummy_scheduler();
+        let (snap_gen_scheduler, _) = dummy_scheduler();
         let sender = Box::new(TestNotifier { tx });
         let cfg = Arc::new(VersionTrack::new(Config::default()));
         let (router, mut system) = create_apply_batch_system(&cfg.value(), None);
@@ -7952,7 +8005,7 @@ mod tests {
             tag: "flashback_need_to_be_applied".to_owned(),
             cfg,
             sender,
-            region_scheduler,
+            snap_gen_scheduler,
             coprocessor_host: host,
             importer,
             engine: engine.clone(),

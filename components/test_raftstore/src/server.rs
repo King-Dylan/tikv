@@ -2,7 +2,7 @@
 
 use std::{
     path::Path,
-    sync::{atomic::AtomicU64, Arc, Mutex, RwLock},
+    sync::{atomic::AtomicU64, mpsc::Receiver, Arc, Mutex, RwLock},
     thread,
     time::Duration,
     usize,
@@ -14,7 +14,7 @@ use causal_ts::CausalTsProviderImpl;
 use collections::{HashMap, HashSet};
 use concurrency_manager::ConcurrencyManager;
 use encryption_export::DataKeyManager;
-use engine_rocks::{RocksEngine, RocksSnapshot};
+use engine_rocks::{FlowInfo, RocksEngine, RocksSnapshot};
 use engine_test::raft::RaftTestEngine;
 use engine_traits::{Engines, MiscExt};
 use futures::executor::block_on;
@@ -23,6 +23,7 @@ use health_controller::HealthController;
 use hybrid_engine::observer::{
     HybridSnapshotObserver, LoadEvictionObserver, RegionCacheWriteBatchObserver,
 };
+use in_memory_engine::{InMemoryEngineConfig, InMemoryEngineContext, RegionCacheMemoryEngine};
 use kvproto::{
     deadlock::create_deadlock,
     debugpb::{create_debug, DebugClient},
@@ -41,13 +42,11 @@ use raftstore::{
     store::{
         fsm::{store::StoreMeta, ApplyRouter, RaftBatchSystem, RaftRouter},
         msg::RaftCmdExtraOpts,
-        AutoSplitController, Callback, CheckLeaderRunner, LocalReader, RegionSnapshot, SnapManager,
-        SnapManagerBuilder, SplitCheckRunner, SplitConfigManager, StoreMetaDelegate,
+        AutoSplitController, Callback, CheckLeaderRunner, DiskCheckRunner, LocalReader,
+        RegionSnapshot, SnapManager, SnapManagerBuilder, SplitCheckRunner, SplitConfigManager,
+        StoreMetaDelegate,
     },
     Result,
-};
-use range_cache_memory_engine::{
-    RangeCacheEngineConfig, RangeCacheEngineContext, RangeCacheMemoryEngine,
 };
 use resource_control::ResourceGroupManager;
 use resource_metering::{CollectorRegHandle, ResourceTagFactory};
@@ -68,7 +67,7 @@ use tikv::{
         lock_manager::LockManager,
         raftkv::ReplicaReadLockChecker,
         resolve::{self, StoreAddrResolver},
-        service::DebugService,
+        service::{DebugService, DefaultGrpcMessageFilter},
         tablet_snap::NoSnapshotCache,
         ConnectionBuilder, Error, MultiRaftServer, PdStoreAddrResolver, RaftClient, RaftKv,
         Result as ServerResult, Server, ServerTransport,
@@ -76,7 +75,10 @@ use tikv::{
     storage::{
         self,
         kv::{FakeExtension, LocalTablets, SnapContext},
-        txn::flow_controller::{EngineFlowController, FlowController},
+        txn::{
+            flow_controller::{EngineFlowController, FlowController},
+            txn_status_cache::TxnStatusCache,
+        },
         Engine, Storage,
     },
 };
@@ -143,6 +145,7 @@ struct ServerMeta {
     raw_router: RaftRouter<RocksEngine, RaftTestEngine>,
     raw_apply_router: ApplyRouter<RocksEngine>,
     gc_worker: GcWorker<RaftKv<RocksEngine, SimulateStoreTransport>>,
+    _reciever: Receiver<FlowInfo>,
     rts_worker: Option<LazyWorker<resolved_ts::Task>>,
     rsmeter_cleanup: Box<dyn FnOnce()>,
 }
@@ -158,7 +161,7 @@ pub struct ServerCluster {
     pub region_info_accessors: HashMap<u64, RegionInfoAccessor>,
     pub importers: HashMap<u64, Arc<SstImporter<RocksEngine>>>,
     pub pending_services: HashMap<u64, PendingServices>,
-    pub coprocessor_hooks: HashMap<u64, CopHooks<RocksEngine>>,
+    pub coprocessor_hosts: HashMap<u64, CopHooks<RocksEngine>>,
     pub health_controllers: HashMap<u64, HealthController>,
     pub security_mgr: Arc<SecurityManager>,
     pub txn_extra_schedulers: HashMap<u64, Arc<dyn TxnExtraScheduler>>,
@@ -209,7 +212,7 @@ impl ServerCluster {
             snap_paths: HashMap::default(),
             snap_mgrs: HashMap::default(),
             pending_services: HashMap::default(),
-            coprocessor_hooks: HashMap::default(),
+            coprocessor_hosts: HashMap::default(),
             health_controllers: HashMap::default(),
             raft_clients: HashMap::default(),
             conn_builder,
@@ -223,10 +226,6 @@ impl ServerCluster {
 
     pub fn get_addr(&self, node_id: u64) -> String {
         self.addrs.get(node_id).unwrap()
-    }
-
-    pub fn get_apply_router(&self, node_id: u64) -> ApplyRouter<RocksEngine> {
-        self.metas.get(&node_id).unwrap().raw_apply_router.clone()
     }
 
     pub fn get_server_router(&self, node_id: u64) -> SimulateStoreTransport {
@@ -309,48 +308,55 @@ impl ServerCluster {
 
         // Create coprocessor.
         let enable_region_stats_mgr_cb: Arc<dyn Fn() -> bool + Send + Sync> =
-            if cfg.range_cache_engine.enabled {
+            if cfg.in_memory_engine.enable {
                 Arc::new(|| true)
             } else {
                 Arc::new(|| false)
             };
         let mut coprocessor_host = CoprocessorHost::new(router.clone(), cfg.coprocessor.clone());
-        if let Some(hooks) = self.coprocessor_hooks.get(&node_id) {
+        if let Some(hooks) = self.coprocessor_hosts.get(&node_id) {
             for hook in hooks {
                 hook(&mut coprocessor_host);
             }
         }
+
+        // In-memory engine
+        let mut in_memory_engine_config = cfg.in_memory_engine.clone();
+        in_memory_engine_config.expected_region_size = cfg.coprocessor.region_split_size();
+        let in_memory_engine_config = Arc::new(VersionTrack::new(in_memory_engine_config));
+        let in_memory_engine_config_clone = in_memory_engine_config.clone();
+
         let region_info_accessor = RegionInfoAccessor::new(
             &mut coprocessor_host,
             enable_region_stats_mgr_cb,
-            cfg.range_cache_engine.mvcc_amplification_threshold,
+            Box::new(move || {
+                in_memory_engine_config_clone
+                    .value()
+                    .mvcc_amplification_threshold
+            }),
         );
 
-        // In-memory engine
-        let mut range_cache_engine_config = cfg.range_cache_engine.clone();
-        let _ = range_cache_engine_config
-            .expected_region_size
-            .get_or_insert(cfg.coprocessor.region_split_size());
-        let range_cache_engine_config = Arc::new(VersionTrack::new(range_cache_engine_config));
-        let range_cache_engine_context =
-            RangeCacheEngineContext::new(range_cache_engine_config.clone(), self.pd_client.clone());
-        let in_memory_engine = if cfg.range_cache_engine.enabled {
+        let in_memory_engine_context =
+            InMemoryEngineContext::new(in_memory_engine_config.clone(), self.pd_client.clone());
+        let in_memory_engine = if cfg.in_memory_engine.enable {
             let in_memory_engine = build_hybrid_engine(
-                range_cache_engine_context,
+                in_memory_engine_context,
                 engines.kv.clone(),
                 None,
                 Some(Arc::new(region_info_accessor.clone())),
+                Box::new(router.clone()),
             );
             // Eviction observer
-            let observer = LoadEvictionObserver::new(Arc::new(in_memory_engine.clone()));
+            let observer =
+                LoadEvictionObserver::new(Arc::new(in_memory_engine.region_cache_engine().clone()));
             observer.register_to(&mut coprocessor_host);
             // Write batch observer
             let write_batch_observer =
-                RegionCacheWriteBatchObserver::new(in_memory_engine.range_cache_engine().clone());
+                RegionCacheWriteBatchObserver::new(in_memory_engine.region_cache_engine().clone());
             write_batch_observer.register_to(&mut coprocessor_host);
             // Snapshot observer
             let snapshot_observer =
-                HybridSnapshotObserver::new(in_memory_engine.range_cache_engine().clone());
+                HybridSnapshotObserver::new(in_memory_engine.region_cache_engine().clone());
             snapshot_observer.register_to(&mut coprocessor_host);
             Some(in_memory_engine)
         } else {
@@ -390,7 +396,7 @@ impl ServerCluster {
             block_on(self.pd_client.get_tso()).expect("failed to get timestamp from PD");
         let concurrency_manager = ConcurrencyManager::new(latest_ts);
 
-        let (tx, _rx) = std::sync::mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::channel();
         let mut gc_worker = GcWorker::new(
             raft_kv.clone(),
             tx,
@@ -398,8 +404,9 @@ impl ServerCluster {
             Default::default(),
             Arc::new(region_info_accessor.clone()),
         );
-        gc_worker.start(node_id).unwrap();
+        gc_worker.start(node_id, coprocessor_host.clone()).unwrap();
 
+        let txn_status_cache = Arc::new(TxnStatusCache::new_for_test());
         let rts_worker = if cfg.resolved_ts.enable {
             // Resolved ts worker
             let mut rts_worker = LazyWorker::new("resolved-ts");
@@ -417,6 +424,7 @@ impl ServerCluster {
                 concurrency_manager.clone(),
                 self.env.clone(),
                 self.security_mgr.clone(),
+                txn_status_cache.clone(),
             );
             // Start the worker
             rts_worker.start(rts_endpoint);
@@ -477,6 +485,7 @@ impl ServerCluster {
                 .as_ref()
                 .map(|m| m.derive_controller("scheduler-worker-pool".to_owned(), true)),
             resource_manager.clone(),
+            txn_status_cache,
         )?;
         self.storages.insert(node_id, raft_kv.clone());
 
@@ -608,6 +617,9 @@ impl ServerCluster {
                 debug_thread_pool.clone(),
                 health_controller.clone(),
                 resource_manager.clone(),
+                Arc::new(DefaultGrpcMessageFilter::new(
+                    server_cfg.value().reject_messages_on_memory_ratio,
+                )),
             )
             .unwrap();
             svr.register_service(create_import_sst(import_service.clone()));
@@ -673,6 +685,7 @@ impl ServerCluster {
             concurrency_manager.clone(),
             collector_reg_handle,
             causal_ts_provider,
+            DiskCheckRunner::dummy(),
             GrpcServiceManager::dummy(),
             Arc::new(AtomicU64::new(0)),
         )?;
@@ -710,6 +723,7 @@ impl ServerCluster {
                 sim_router,
                 sim_trans: simulate_trans,
                 gc_worker,
+                _reciever: rx,
                 rts_worker,
                 rsmeter_cleanup,
             },
@@ -729,13 +743,13 @@ impl ServerCluster {
         Some(w.scheduler())
     }
 
-    pub fn get_range_cache_engine(&self, node_id: u64) -> RangeCacheMemoryEngine {
+    pub fn get_region_cache_engine(&self, node_id: u64) -> RegionCacheMemoryEngine {
         self.in_memory_engines
             .get(&node_id)
             .unwrap()
             .as_ref()
             .unwrap()
-            .range_cache_engine()
+            .region_cache_engine()
             .clone()
     }
 }
@@ -876,6 +890,10 @@ impl Simulator for ServerCluster {
     fn get_router(&self, node_id: u64) -> Option<RaftRouter<RocksEngine, RaftTestEngine>> {
         self.metas.get(&node_id).map(|m| m.raw_router.clone())
     }
+
+    fn get_apply_router(&self, node_id: u64) -> Option<ApplyRouter<RocksEngine>> {
+        self.metas.get(&node_id).map(|m| m.raw_apply_router.clone())
+    }
 }
 
 impl Cluster<ServerCluster> {
@@ -928,7 +946,7 @@ impl Cluster<ServerCluster> {
     ) {
         self.sim
             .wl()
-            .coprocessor_hooks
+            .coprocessor_hosts
             .entry(node_id)
             .or_default()
             .push(register);
@@ -941,14 +959,11 @@ pub fn new_server_cluster(id: u64, count: usize) -> Cluster<ServerCluster> {
     Cluster::new(id, count, sim, pd_client, ApiVersion::V1)
 }
 
-pub fn new_server_cluster_with_hybrid_engine_with_no_range_cache(
-    id: u64,
-    count: usize,
-) -> Cluster<ServerCluster> {
+pub fn new_server_cluster_with_hybrid_engine(id: u64, count: usize) -> Cluster<ServerCluster> {
     let pd_client = Arc::new(TestPdClient::new(id, false));
     let sim = Arc::new(RwLock::new(ServerCluster::new(Arc::clone(&pd_client))));
     let mut cluster = Cluster::new(id, count, sim, pd_client, ApiVersion::V1);
-    cluster.cfg.tikv.range_cache_engine = RangeCacheEngineConfig::config_for_test();
+    cluster.cfg.tikv.in_memory_engine = InMemoryEngineConfig::config_for_test();
     cluster
 }
 
@@ -978,7 +993,7 @@ pub fn must_new_and_configure_cluster(
     must_new_and_configure_cluster_mul(1, configure)
 }
 
-fn must_new_and_configure_cluster_mul(
+pub fn must_new_and_configure_cluster_mul(
     count: usize,
     mut configure: impl FnMut(&mut Cluster<ServerCluster>),
 ) -> (Cluster<ServerCluster>, metapb::Peer, Context) {

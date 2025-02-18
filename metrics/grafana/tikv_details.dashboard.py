@@ -56,18 +56,21 @@ def Templates() -> Templating:
         list=[
             template(
                 name="k8s_cluster",
+                type="query",
                 query="label_values(tikv_engine_block_cache_size_bytes, k8s_cluster)",
                 data_source=DATASOURCE,
                 hide=HIDE_VARIABLE,
             ),
             template(
                 name="tidb_cluster",
+                type="query",
                 query='label_values(tikv_engine_block_cache_size_bytes{k8s_cluster ="$k8s_cluster"}, tidb_cluster)',
                 data_source=DATASOURCE,
                 hide=HIDE_VARIABLE,
             ),
             template(
                 name="db",
+                type="query",
                 query='label_values(tikv_engine_block_cache_size_bytes{k8s_cluster="$k8s_cluster", tidb_cluster="$tidb_cluster"}, db)',
                 data_source=DATASOURCE,
                 hide=SHOW,
@@ -76,6 +79,7 @@ def Templates() -> Templating:
             ),
             template(
                 name="command",
+                type="query",
                 query='query_result(tikv_storage_command_total{k8s_cluster="$k8s_cluster", tidb_cluster="$tidb_cluster"} != 0)',
                 data_source=DATASOURCE,
                 hide=SHOW,
@@ -85,19 +89,29 @@ def Templates() -> Templating:
             ),
             template(
                 name="instance",
+                type="query",
                 query='label_values(tikv_engine_size_bytes{k8s_cluster ="$k8s_cluster", tidb_cluster="$tidb_cluster"}, instance)',
                 data_source=DATASOURCE,
                 hide=SHOW,
+                multi=True,
                 include_all=True,
                 all_value=".*",
             ),
             template(
                 name="titan_db",
+                type="query",
                 query='label_values(tikv_engine_titandb_num_live_blob_file{k8s_cluster="$k8s_cluster", tidb_cluster="$tidb_cluster"}, db)',
                 data_source=DATASOURCE,
                 hide=HIDE_VARIABLE,
                 multi=True,
                 include_all=True,
+            ),
+            template(
+                name="additional_groupby",
+                type="custom",
+                query="none,instance",
+                data_source=DATASOURCE,
+                hide=SHOW,
             ),
         ]
     )
@@ -119,6 +133,7 @@ def Duration() -> RowPanel:
                             0.99, "tikv_raftstore_append_log_duration_seconds"
                         ),
                         legend_format="Write Raft Log .99",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_histogram_quantile(
@@ -126,24 +141,28 @@ def Duration() -> RowPanel:
                             "tikv_raftstore_request_wait_time_duration_secs",
                         ),
                         legend_format="Propose Wait .99",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_histogram_quantile(
                             0.99, "tikv_raftstore_apply_wait_time_duration_secs"
                         ),
                         legend_format="Apply Wait .99",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_histogram_quantile(
                             0.99, "tikv_raftstore_commit_log_duration_seconds"
                         ),
                         legend_format="Replicate Raft Log .99",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_histogram_quantile(
                             0.99, "tikv_raftstore_apply_log_duration_seconds"
                         ),
                         legend_format="Apply Duration .99",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -161,6 +180,7 @@ def Duration() -> RowPanel:
                             ['type="snapshot"'],
                         ),
                         legend_format="Get Snapshot .99",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_histogram_quantile(
@@ -169,12 +189,15 @@ def Duration() -> RowPanel:
                             ['type="all"'],
                         ),
                         legend_format="Cop Wait .99",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_histogram_quantile(
-                            0.95, "tikv_coprocessor_request_handle_seconds"
+                            0.95,
+                            "tikv_coprocessor_request_handle_seconds",
                         ),
                         legend_format="Cop Handle .99",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -317,10 +340,10 @@ def Cluster() -> RowPanel:
                     ),
                     target(
                         expr=expr_sum_rate(
-                            "tikv_range_cache_memory_engine_flow",
+                            "tikv_in_memory_engine_flow",
                             label_selectors=['type=~"bytes_read|iter_bytes_read"'],
                         ),
-                        legend_format=r"{{instance}}-range-cache-engine-read-",
+                        legend_format=r"{{instance}}-in-memory-engine-read",
                     ),
                 ],
             ),
@@ -648,7 +671,11 @@ def Server() -> RowPanel:
                 yaxes=yaxes(left_format=UNITS.BYTES_IEC),
                 targets=[
                     target(
-                        expr=expr_sum("tikv_engine_size_bytes", by_labels=["type"]),
+                        expr=expr_sum(
+                            "tikv_engine_size_bytes",
+                            by_labels=["type"],
+                        ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -839,6 +866,7 @@ def Server() -> RowPanel:
                             by_labels=["name", "priority"],
                         ),
                         legend_format="{{name}}-{{priority}}",
+                        additional_groupby=True,
                     ),
                 ],
                 thresholds=[GraphThreshold(value=1.0)],
@@ -854,6 +882,7 @@ def Server() -> RowPanel:
                             by_labels=["name", "priority"],
                         ),
                         legend_format="{{name}}-{{priority}}",
+                        additional_groupby=True,
                     ),
                 ],
                 thresholds=[GraphThreshold(value=1.0)],
@@ -874,6 +903,7 @@ def Server() -> RowPanel:
                             label_selectors=['metric="block_read_time"'],
                             by_labels=["req"],
                         ),
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_sum_rate(
@@ -882,6 +912,7 @@ def Server() -> RowPanel:
                             by_labels=["req"],
                         ),
                         legend_format="copr-{{req}}",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -897,6 +928,7 @@ def Server() -> RowPanel:
                             label_selectors=['metric="block_read_byte"'],
                             by_labels=["req"],
                         ),
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_sum_rate(
@@ -905,6 +937,7 @@ def Server() -> RowPanel:
                             by_labels=["req"],
                         ),
                         legend_format="copr-{{req}}",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -928,6 +961,7 @@ def gRPC() -> RowPanel:
                             label_selectors=['type!="kv_gc"'],
                             by_labels=["type"],
                         ),
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_sum_rate(
@@ -936,6 +970,7 @@ def gRPC() -> RowPanel:
                             by_labels=["type", "priority"],
                         ),
                         hide=True,
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -950,6 +985,7 @@ def gRPC() -> RowPanel:
                             label_selectors=['type!="kv_gc"'],
                             by_labels=["type"],
                         ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -970,6 +1006,7 @@ def gRPC() -> RowPanel:
                             by_labels=["type"],
                         ),
                         legend_format="{{type}}",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_histogram_quantile(
@@ -980,6 +1017,7 @@ def gRPC() -> RowPanel:
                         ),
                         legend_format="{{type}}-{{priority}}",
                         hide=True,
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -994,6 +1032,7 @@ def gRPC() -> RowPanel:
                             by_labels=["type"],
                         ),
                         legend_format="{{type}}",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_histogram_avg(
@@ -1002,6 +1041,7 @@ def gRPC() -> RowPanel:
                         ),
                         legend_format="{{type}}-{{priority}}",
                         hide=True,
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -1019,6 +1059,7 @@ def gRPC() -> RowPanel:
                             "tikv_server_grpc_req_batch_size",
                         ),
                         legend_format=r"99% request",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_histogram_quantile(
@@ -1026,6 +1067,7 @@ def gRPC() -> RowPanel:
                             "tikv_server_grpc_resp_batch_size",
                         ),
                         legend_format=r"99% response",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_histogram_avg(
@@ -1033,6 +1075,7 @@ def gRPC() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="avg request",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_histogram_avg(
@@ -1040,6 +1083,7 @@ def gRPC() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="avg response",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_histogram_quantile(
@@ -1047,6 +1091,7 @@ def gRPC() -> RowPanel:
                             "tikv_server_request_batch_size",
                         ),
                         legend_format=r"99% kv get batch",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_histogram_avg(
@@ -1054,6 +1099,7 @@ def gRPC() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="avg kv batch",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -1066,6 +1112,7 @@ def gRPC() -> RowPanel:
                             "tikv_server_raft_message_batch_size",
                         ),
                         legend_format=r"99%",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_histogram_avg(
@@ -1073,6 +1120,7 @@ def gRPC() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="avg",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -1090,6 +1138,7 @@ def gRPC() -> RowPanel:
                             "tikv_grpc_request_source_counter_vec",
                             by_labels=["source"],
                         ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -1105,6 +1154,7 @@ def gRPC() -> RowPanel:
                             "tikv_grpc_request_source_duration_vec",
                             by_labels=["source"],
                         ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -1120,6 +1170,7 @@ def gRPC() -> RowPanel:
                         expr=expr_sum_rate(
                             "tikv_grpc_resource_group_total", by_labels=["name"]
                         ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -1317,7 +1368,7 @@ def ThreadCPU() -> RowPanel:
                     target(
                         expr=expr_sum_rate(
                             "tikv_thread_cpu_seconds_total",
-                            label_selectors=['name=~"sst_.*"'],
+                            label_selectors=['name=~"(sst_|impwkr_).*"'],
                         ),
                     ),
                 ],
@@ -1472,6 +1523,28 @@ def ThreadCPU() -> RowPanel:
             ),
         ]
     )
+    layout.row(
+        [
+            graph_panel(
+                title="Busy Threads (>80%)",
+                yaxes=yaxes(left_format=UNITS.PERCENT_UNIT),
+                targets=[
+                    target(
+                        expr=expr_topk(
+                            20,
+                            "%s"
+                            % expr_sum_rate(
+                                "tikv_thread_cpu_seconds_total",
+                                label_selectors=['name!~"rocksdb.*"'],
+                                by_labels=["instance", "name"],
+                            ).extra(extra_expr="> 0.8"),
+                        ),
+                        legend_format="{{name}}-{{instance}}",
+                    ),
+                ],
+            ),
+        ]
+    )
     return layout.row_panel
 
 
@@ -1486,7 +1559,6 @@ def TTL() -> RowPanel:
                         expr=expr_sum_rate(
                             "tikv_ttl_expire_kv_count_total",
                         ),
-                        legend_format="{{instance}}",
                     ),
                 ],
             ),
@@ -1497,7 +1569,7 @@ def TTL() -> RowPanel:
                     target(
                         expr=expr_sum_rate(
                             "tikv_ttl_expire_kv_size_total",
-                        )
+                        ),
                     ),
                 ],
             ),
@@ -1531,7 +1603,8 @@ def TTL() -> RowPanel:
                     target(
                         expr=expr_sum_rate(
                             "tikv_ttl_checker_actions", by_labels=["type"]
-                        )
+                        ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -1577,6 +1650,7 @@ def PD() -> RowPanel:
                             "tikv_pd_request_duration_seconds_count",
                             by_labels=["type"],
                         ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -1591,6 +1665,7 @@ def PD() -> RowPanel:
                             by_labels=["type"],
                         ),
                         legend_format="{{type}}",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -1608,6 +1683,7 @@ def PD() -> RowPanel:
                             "tikv_pd_heartbeat_message_total",
                             by_labels=["type"],
                         ),
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_sum(
@@ -1627,6 +1703,7 @@ def PD() -> RowPanel:
                             "tikv_pd_validate_peer_total",
                             by_labels=["type"],
                         ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -1645,6 +1722,7 @@ def PD() -> RowPanel:
                             range_selector="$__rate_interval",
                             by_labels=["type"],
                         ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -1673,6 +1751,7 @@ def PD() -> RowPanel:
                         expr=expr_sum(
                             "tikv_pd_pending_tso_request_total",
                         ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -1696,6 +1775,7 @@ def IOBreakdown() -> RowPanel:
                             label_selectors=['op="write"'],
                             by_labels=["type"],
                         ),
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_sum_rate(
@@ -1704,6 +1784,7 @@ def IOBreakdown() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="total",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -1718,6 +1799,7 @@ def IOBreakdown() -> RowPanel:
                             label_selectors=['op="read"'],
                             by_labels=["type"],
                         ),
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_sum_rate(
@@ -1726,6 +1808,7 @@ def IOBreakdown() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="total",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -1743,6 +1826,7 @@ def IOBreakdown() -> RowPanel:
                             "tikv_rate_limiter_max_bytes_per_sec",
                             by_labels=["type"],
                         ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -1758,6 +1842,7 @@ def IOBreakdown() -> RowPanel:
                             by_labels=["type"],
                         ),
                         legend_format=r"{{type}}-99%",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_histogram_avg(
@@ -1765,6 +1850,7 @@ def IOBreakdown() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="avg",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -1806,13 +1892,13 @@ def RaftWaterfall() -> RowPanel:
         [
             graph_panel_histogram_quantiles(
                 title="Store propose wait duration",
-                description="The propose wait time duration of each request",
+                description="Time from request scheduling to when it is handled by Raftstore",
                 yaxes=yaxes(left_format=UNITS.SECONDS),
                 metric="tikv_raftstore_request_wait_time_duration_secs",
             ),
             graph_panel_histogram_quantiles(
                 title="Store batch wait duration",
-                description="The batch wait time duration of each request",
+                description="Time from request scheduling to when a batch of requests is formed and prepared to be proposed to Raft",
                 yaxes=yaxes(left_format=UNITS.SECONDS),
                 metric="tikv_raftstore_store_wf_batch_wait_duration_seconds",
             ),
@@ -1822,13 +1908,13 @@ def RaftWaterfall() -> RowPanel:
         [
             graph_panel_histogram_quantiles(
                 title="Store send to write queue duration",
-                description="The send-to-write-queue time duration of each request",
+                description="Time from request scheduling to just before it is sent to the store writer thread",
                 yaxes=yaxes(left_format=UNITS.SECONDS),
                 metric="tikv_raftstore_store_wf_send_to_queue_duration_seconds",
             ),
             graph_panel_histogram_quantiles(
                 title="Store send proposal duration",
-                description="The send raft message of the proposal duration of each request",
+                description="Time from request scheduling to just before it is sent to followers",
                 yaxes=yaxes(left_format=UNITS.SECONDS),
                 metric="tikv_raftstore_store_wf_send_proposal_duration_seconds",
             ),
@@ -1838,13 +1924,13 @@ def RaftWaterfall() -> RowPanel:
         [
             graph_panel_histogram_quantiles(
                 title="Store write kv db end duration",
-                description="The write kv db end duration of each request",
+                description="Time from request scheduling to when the batch's snapshot state is written to KV DB",
                 yaxes=yaxes(left_format=UNITS.SECONDS),
                 metric="tikv_raftstore_store_wf_write_kvdb_end_duration_seconds",
             ),
             graph_panel_histogram_quantiles(
                 title="Store before write duration",
-                description="The before write time duration of each request",
+                description="Time from request scheduling to just before it is written to Raft Engine",
                 yaxes=yaxes(left_format=UNITS.SECONDS),
                 metric="tikv_raftstore_store_wf_before_write_duration_seconds",
             ),
@@ -1853,16 +1939,16 @@ def RaftWaterfall() -> RowPanel:
     layout.row(
         [
             graph_panel_histogram_quantiles(
-                title="Store persist duration",
-                description="The persist duration of each request",
-                yaxes=yaxes(left_format=UNITS.SECONDS),
-                metric="tikv_raftstore_store_wf_persist_duration_seconds",
-            ),
-            graph_panel_histogram_quantiles(
                 title="Store write end duration",
-                description="The write end duration of each request",
+                description="Time from request scheduling to when it is written to Raft Engine",
                 yaxes=yaxes(left_format=UNITS.SECONDS),
                 metric="tikv_raftstore_store_wf_write_end_duration_seconds",
+            ),
+            graph_panel_histogram_quantiles(
+                title="Store persist duration",
+                description="Time from request scheduling to when its associated ready is persisted on the leader",
+                yaxes=yaxes(left_format=UNITS.SECONDS),
+                metric="tikv_raftstore_store_wf_persist_duration_seconds",
             ),
         ]
     )
@@ -1870,13 +1956,13 @@ def RaftWaterfall() -> RowPanel:
         [
             graph_panel_histogram_quantiles(
                 title="Store commit but not persist duration",
-                description="The commit but not persist duration of each request",
+                description="Time from request scheduling to when it is committed; at the time of commit, it has not been persisted on the leader",
                 yaxes=yaxes(left_format=UNITS.SECONDS),
                 metric="tikv_raftstore_store_wf_commit_not_persist_log_duration_seconds",
             ),
             graph_panel_histogram_quantiles(
                 title="Store commit and persist duration",
-                description="The commit and persist duration of each request",
+                description="Time from request scheduling to when it is committed; at the time of commit, it has been persisted on the leader",
                 yaxes=yaxes(left_format=UNITS.SECONDS),
                 metric="tikv_raftstore_store_wf_commit_log_duration_seconds",
             ),
@@ -1890,9 +1976,9 @@ def RaftIO() -> RowPanel:
     layout.row(
         heatmap_panel_graph_panel_histogram_quantile_pairs(
             heatmap_title="Process ready duration",
-            heatmap_description="The time consumed for peer processes to be ready in Raft",
+            heatmap_description="The time taken by Raftstore to complete processing a poll round, which includes a batch of region peers",
             graph_title="99% Process ready duration per server",
-            graph_description="The time consumed for peer processes to be ready in Raft",
+            graph_description="The time taken by Raftstore to complete processing a poll round, which includes a batch of region peers",
             graph_by_labels=["instance"],
             graph_hides=["count", "avg"],
             yaxis_format=UNITS.SECONDS,
@@ -2028,6 +2114,7 @@ def RaftPropose() -> RowPanel:
                             label_selectors=['type=~"local_read|normal|read_index"'],
                             by_labels=["type"],
                         ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -2141,6 +2228,7 @@ def RaftPropose() -> RowPanel:
                             by_labels=["type"],
                         ),
                         legend_format="store-{{type}}",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_histogram_quantile(
@@ -2149,6 +2237,7 @@ def RaftPropose() -> RowPanel:
                             by_labels=["type"],
                         ),
                         legend_format="apply-{{type}}",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -2170,6 +2259,7 @@ def RaftProcess() -> RowPanel:
                             "tikv_raftstore_raft_ready_handled_total",
                             by_labels=["type"],
                         ),
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_sum_rate(
@@ -2178,6 +2268,7 @@ def RaftProcess() -> RowPanel:
                             by_labels=[],  # overwrite default by instance.
                         ),
                         legend_format="count",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -2193,6 +2284,7 @@ def RaftProcess() -> RowPanel:
                             by_labels=["type"],
                         ),
                         legend_format="{{type}}",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_histogram_quantile(
@@ -2200,6 +2292,7 @@ def RaftProcess() -> RowPanel:
                             "tikv_broadcast_normal_duration_seconds",
                         ),
                         legend_format="broadcast_normal",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -2213,10 +2306,100 @@ def RaftProcess() -> RowPanel:
                 yaxis=yaxis(format=UNITS.SECONDS),
                 metric="tikv_replica_read_lock_check_duration_seconds_bucket",
             ),
+            graph_panel(
+                title="Fsm reschedule ops",
+                description="The number of fsm reschedule ops",
+                yaxes=yaxes(left_format=UNITS.OPS_PER_SEC),
+                targets=[
+                    target(
+                        expr=expr_sum_rate(
+                            "tikv_batch_system_fsm_reschedule_total",
+                            by_labels=["type"],
+                        ),
+                    ),
+                ],
+            ),
+        ]
+    )
+    layout.row(
+        [
+            heatmap_panel(
+                title="Store fsm schedule wait duration",
+                description="Duration of store fsm waiting to be polled",
+                yaxis=yaxis(format=UNITS.SECONDS),
+                metric="tikv_batch_system_fsm_schedule_wait_seconds_bucket",
+                label_selectors=['type="store"'],
+            ),
+            heatmap_panel(
+                title="Apply fsm schedule wait duration",
+                description="Duration of apply fsm waiting to be polled.e",
+                yaxis=yaxis(format=UNITS.SECONDS),
+                metric="tikv_batch_system_fsm_schedule_wait_seconds_bucket",
+                label_selectors=['type="apply"'],
+            ),
+        ]
+    )
+    layout.row(
+        [
+            heatmap_panel(
+                title="Store fsm poll duration",
+                description="Total time for an store FSM to finish processing all messages, potentially over multiple polling rounds.",
+                yaxis=yaxis(format=UNITS.SECONDS),
+                metric="tikv_batch_system_fsm_poll_seconds_bucket",
+                label_selectors=['type="store"'],
+            ),
+            heatmap_panel(
+                title="Apply fsm poll duration",
+                description="Total time for an apply FSM to finish processing all messages, potentially over multiple polling rounds",
+                yaxis=yaxis(format=UNITS.SECONDS),
+                metric="tikv_batch_system_fsm_poll_seconds_bucket",
+                label_selectors=['type="apply"'],
+            ),
+        ]
+    )
+    layout.row(
+        [
+            heatmap_panel(
+                title="Store fsm poll round",
+                description="Number of polling rounds for an store FSM to finish processing all messages",
+                metric="tikv_batch_system_fsm_poll_rounds_bucket",
+                label_selectors=['type="store"'],
+            ),
+            heatmap_panel(
+                title="Apply fsm poll round",
+                description="Number of polling rounds for an apply FSM to finish processing all messages",
+                metric="tikv_batch_system_fsm_poll_rounds_bucket",
+                label_selectors=['type="apply"'],
+            ),
+        ]
+    )
+    layout.row(
+        [
+            heatmap_panel(
+                title="Store fsm count per poll",
+                description="Number of store fsm polled in one poll",
+                metric="tikv_batch_system_fsm_count_per_poll_bucket",
+                label_selectors=['type="store"'],
+            ),
+            heatmap_panel(
+                title="Apply fsm count per poll",
+                description="Number of apply fsm polled in one poll",
+                metric="tikv_batch_system_fsm_count_per_poll_bucket",
+                label_selectors=['type="apply"'],
+            ),
+        ]
+    )
+    layout.row(
+        [
             heatmap_panel(
                 title="Peer msg length distribution",
                 description="The length of peer msgs for each round handling",
                 metric="tikv_raftstore_peer_msg_len_bucket",
+            ),
+            heatmap_panel(
+                title="Apply msg length distribution",
+                description="The length of apply msgs for each round handling",
+                metric="tikv_raftstore_apply_msg_len_bucket",
             ),
         ]
     )
@@ -2319,6 +2502,7 @@ def RaftMessage() -> RowPanel:
                             label_selectors=['status="accept"'],
                             by_labels=["type"],
                         ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -2349,6 +2533,7 @@ def RaftMessage() -> RowPanel:
                             "tikv_raftstore_raft_dropped_message_total",
                             by_labels=["type"],
                         ),
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_sum_rate(
@@ -2356,10 +2541,35 @@ def RaftMessage() -> RowPanel:
                             label_selectors=['status="drop"'],
                             by_labels=["type"],
                         ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
         ]
+    )
+    layout.row(
+        heatmap_panel_graph_panel_histogram_quantile_pairs(
+            heatmap_title="Raft Message Send Wait duration",
+            heatmap_description="The time consumed waiting to send Raft Messages",
+            graph_title="99% Raft Message Send Wait Duration",
+            graph_description="The time consumed waiting to send Raft Messages per TiKV instance",
+            graph_by_labels=["instance"],
+            yaxis_format=UNITS.SECONDS,
+            metric="tikv_server_raft_message_duration_seconds",
+            label_selectors=['type="send_wait"'],
+        )
+    )
+    layout.row(
+        heatmap_panel_graph_panel_histogram_quantile_pairs(
+            heatmap_title="Raft Message Receive Delay duration",
+            heatmap_description="The time consumed to transmit Raft Messages over the network, reported by the receiver",
+            graph_title="99% Raft Message Receive Delay Duration",
+            graph_description="The time consumed to transmit Raft Messages over the network per TiKV instance, reported by the receiver",
+            graph_by_labels=["instance"],
+            yaxis_format=UNITS.SECONDS,
+            metric="tikv_server_raft_message_duration_seconds",
+            label_selectors=['type="receive_delay"'],
+        )
     )
     return layout.row_panel
 
@@ -2379,6 +2589,7 @@ def RaftAdmin() -> RowPanel:
                             label_selectors=['type=~"conf_change|transfer_leader"'],
                             by_labels=["type"],
                         ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -2393,6 +2604,7 @@ def RaftAdmin() -> RowPanel:
                             label_selectors=['type!="compact"'],
                             by_labels=["type"],
                         ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -2411,6 +2623,7 @@ def RaftAdmin() -> RowPanel:
                             label_selectors=['type!="ignore"'],
                             by_labels=["type"],
                         ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -2443,6 +2656,7 @@ def RaftAdmin() -> RowPanel:
                             range_selector="1m",
                             by_labels=["type"],
                         ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -2615,6 +2829,7 @@ def RaftLog() -> RowPanel:
                             "tikv_raftstore_entry_fetches",
                             by_labels=["type"],
                         ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -2632,6 +2847,7 @@ def RaftLog() -> RowPanel:
                             "tikv_raftstore_entry_fetches_task_duration_seconds",
                         ),
                         legend_format="99.99%",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_histogram_avg(
@@ -2646,6 +2862,7 @@ def RaftLog() -> RowPanel:
                             label_selectors=['name=~"raftlog-fetch-worker"'],
                         ),
                         legend_format="pending-task",
+                        additional_groupby=True,
                     ),
                 ],
                 series_overrides=[
@@ -2701,34 +2918,49 @@ def LocalReader() -> RowPanel:
 
 
 def UnifiedReadPool() -> RowPanel:
-    layout = Layout(title="Unified Read Pool")
+    return YatpPool(
+        title="Unified Read Pool",
+        pool_name_prefix="unified-read",
+        running_task_metric="tikv_unified_read_pool_running_tasks",
+        running_task_metric_label="priority",
+    )
+
+
+def YatpPool(
+    title: str,
+    pool_name_prefix: str,
+    running_task_metric: str,
+    running_task_metric_label: str,
+) -> RowPanel:
+    layout = Layout(title)
     layout.row(
         [
             graph_panel(
                 title="Time used by level",
-                description="The time used by each level in the unified read pool per second. Level 0 refers to small queries.",
+                description="The time used by each level in the yatp thread pool per second. Level 0 refers to small queries.",
                 yaxes=yaxes(left_format=UNITS.MICRO_SECONDS),
                 targets=[
                     target(
                         expr=expr_sum_rate(
                             "tikv_multilevel_level_elapsed",
-                            label_selectors=['name="unified-read-pool"'],
+                            label_selectors=[f'name=~"{pool_name_prefix}.*"'],
                             by_labels=["level"],
                         ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
             graph_panel(
                 title="Level 0 chance",
-                description="The chance that level 0 (small) tasks are scheduled in the unified read pool.",
+                description="The chance that level 0 (small) tasks are scheduled in the yatp thread pool.",
                 yaxes=yaxes(left_format=UNITS.PERCENT_UNIT),
                 targets=[
                     target(
                         expr=expr_simple(
                             "tikv_multilevel_level0_chance",
-                            label_selectors=['name="unified-read-pool"'],
+                            label_selectors=[f'name=~"{pool_name_prefix}.*"'],
                         ),
-                        legend_format="{{type}}",
+                        legend_format="{{instance}}",
                     ),
                 ],
             ),
@@ -2738,24 +2970,24 @@ def UnifiedReadPool() -> RowPanel:
         [
             graph_panel(
                 title="Running tasks",
-                description="The number of concurrently running tasks in the unified read pool.",
+                description="The number of concurrently running tasks in the yatp thread pool.",
                 targets=[
                     target(
                         expr=expr_sum_aggr_over_time(
-                            "tikv_unified_read_pool_running_tasks",
+                            running_task_metric,
                             "avg",
                             "1m",
-                            by_labels=["priority"],
+                            by_labels=[running_task_metric_label],
                         ),
-                        legend_format="{{priority}}",
+                        additional_groupby=True,
                     ),
                 ],
             ),
             heatmap_panel(
-                title="Unified Read Pool Wait Duration",
+                title="Wait Duration",
                 yaxis=yaxis(format=UNITS.SECONDS),
                 metric="tikv_yatp_pool_schedule_wait_duration_bucket",
-                label_selectors=['name=~"unified-read.*"'],
+                label_selectors=[f'name=~"{pool_name_prefix}.*"'],
             ),
         ]
     )
@@ -2763,16 +2995,18 @@ def UnifiedReadPool() -> RowPanel:
         [
             graph_panel_histogram_quantiles(
                 title="Duration of One Time Slice",
-                description="Unified read pool task execution time during one schedule.",
+                description="Task execution time during one schedule.",
                 yaxes=yaxes(left_format=UNITS.SECONDS, log_base=2),
                 metric="tikv_yatp_task_poll_duration",
+                label_selectors=[f'name=~"{pool_name_prefix}.*"'],
                 hide_count=True,
             ),
             graph_panel_histogram_quantiles(
                 title="Task Execute Duration",
-                description="Unified read pool task total execution duration.",
+                description="Task total execution duration.",
                 yaxes=yaxes(left_format=UNITS.SECONDS, log_base=2),
                 metric="tikv_yatp_task_exec_duration",
+                label_selectors=[f'name=~"{pool_name_prefix}.*"'],
                 hide_count=True,
             ),
         ]
@@ -2784,6 +3018,7 @@ def UnifiedReadPool() -> RowPanel:
                 description="Task schedule number of times.",
                 yaxes=yaxes(left_format=UNITS.NONE_FORMAT, log_base=2),
                 metric="tikv_yatp_task_execute_times",
+                label_selectors=[f'name=~"{pool_name_prefix}.*"'],
                 hide_count=True,
             ),
         ]
@@ -2805,6 +3040,7 @@ def Storage() -> RowPanel:
                             "tikv_storage_command_total",
                             by_labels=["type"],
                         ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -2818,6 +3054,7 @@ def Storage() -> RowPanel:
                             label_selectors=['status!~"all|success"'],
                             by_labels=["status"],
                         ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -2889,6 +3126,7 @@ def Storage() -> RowPanel:
                         expr=expr_sum(
                             "tikv_storage_process_stat_cpu_usage",
                         ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -2917,6 +3155,25 @@ def Storage() -> RowPanel:
                 metric="tikv_storage_full_compact_increment_duration_seconds",
                 hide_count=True,
             ),
+        ]
+    )
+    layout.row(
+        [
+            graph_panel(
+                title="Concurrency manager max-ts",
+                description="The max_ts in the concurrency manager",
+                yaxes=yaxes(left_format=UNITS.NONE_FORMAT),
+                targets=[
+                    target(
+                        expr="tikv_concurrency_manager_max_ts_limit",
+                        legend_format="max_ts_limit",
+                    ),
+                    target(
+                        expr="tikv_concurrency_manager_max_ts",
+                        legend_format="max_ts",
+                    ),
+                ],
+            )
         ]
     )
     return layout.row_panel
@@ -2993,6 +3250,7 @@ def FlowControl() -> RowPanel:
                             "tikv_scheduler_throttle_action_total",
                             by_labels=["type", "cf"],
                         ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -3068,13 +3326,16 @@ def FlowControl() -> RowPanel:
                             label_selectors=['db="kv"'],
                             by_labels=["cf"],
                         ),
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_sum(
                             "tikv_scheduler_pending_compaction_bytes",
                             by_labels=["cf"],
                         ).extra(" / 10000000"),
-                        legend_format="pending-bytes-{{instance}}",
+                        legend_format="pending-bytes",
+                        hide=True,
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -3092,6 +3353,7 @@ def FlowControl() -> RowPanel:
                             "tikv_txn_command_throttle_time_total",
                             by_labels=["type"],
                         ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -3105,6 +3367,7 @@ def FlowControl() -> RowPanel:
                             "tikv_non_txn_command_throttle_time_total",
                             by_labels=["type"],
                         ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -3135,6 +3398,7 @@ def SchedulerCommands() -> RowPanel:
                             label_selectors=['type="$command"'],
                             by_labels=["stage"],
                         ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -3193,6 +3457,7 @@ def SchedulerCommands() -> RowPanel:
                             label_selectors=['req="$command"'],
                             by_labels=["tag"],
                         ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -3207,6 +3472,7 @@ def SchedulerCommands() -> RowPanel:
                             label_selectors=['req="$command", cf="lock"'],
                             by_labels=["tag"],
                         ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -3225,6 +3491,7 @@ def SchedulerCommands() -> RowPanel:
                             label_selectors=['req="$command", cf="write"'],
                             by_labels=["tag"],
                         ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -3239,6 +3506,7 @@ def SchedulerCommands() -> RowPanel:
                             label_selectors=['req="$command", cf="default"'],
                             by_labels=["tag"],
                         ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -3280,12 +3548,14 @@ def Scheduler() -> RowPanel:
                             "tikv_scheduler_too_busy_total",
                             by_labels=["stage"],
                         ),
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_sum_rate(
                             "tikv_scheduler_stage_total",
                             by_labels=["stage"],
                         ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -3299,6 +3569,7 @@ def Scheduler() -> RowPanel:
                             "tikv_scheduler_commands_pri_total",
                             by_labels=["priority"],
                         ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -3381,6 +3652,15 @@ def Scheduler() -> RowPanel:
     return layout.row_panel
 
 
+def SchedulerWorkerPool() -> RowPanel:
+    return YatpPool(
+        title="Scheduler Worker Pool",
+        pool_name_prefix="sched-worker",
+        running_task_metric="tikv_scheduler_running_commands",
+        running_task_metric_label="instance",
+    )
+
+
 def GC() -> RowPanel:
     layout = Layout(title="GC")
     layout.row(
@@ -3395,6 +3675,7 @@ def GC() -> RowPanel:
                             by_labels=["task"],
                         ),
                         legend_format="total-{{task}}",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_sum_rate(
@@ -3402,6 +3683,7 @@ def GC() -> RowPanel:
                             by_labels=["task"],
                         ),
                         legend_format="skipped-{{task}}",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_sum_rate(
@@ -3409,6 +3691,7 @@ def GC() -> RowPanel:
                             by_labels=["task"],
                         ),
                         legend_format="failed-{{task}}",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_sum_rate(
@@ -3416,6 +3699,7 @@ def GC() -> RowPanel:
                             by_labels=[],
                         ),
                         legend_format="gcworker-too-busy",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -3453,6 +3737,7 @@ def GC() -> RowPanel:
                             "tidb_tikvclient_gc_worker_actions_total",
                             by_labels=["type"],
                         ).skip_default_instance_selector(),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -3470,6 +3755,7 @@ def GC() -> RowPanel:
                             label_selectors=['type=~"resolve-locks.*"'],
                             by_labels=["result"],
                         ).skip_default_instance_selector(),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -3508,6 +3794,7 @@ def GC() -> RowPanel:
                             by_labels=["key_mode"],
                         ),
                         legend_format="{{key_mode}}_keys/s",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -3522,6 +3809,7 @@ def GC() -> RowPanel:
                         )
                         .extra("/ (2^18)")
                         .skip_default_instance_selector(),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -3571,6 +3859,7 @@ def GC() -> RowPanel:
                             by_labels=["key_mode"],
                         ),
                         legend_format="{{key_mode}}_filtered",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_sum_rate(
@@ -3578,6 +3867,7 @@ def GC() -> RowPanel:
                             by_labels=["key_mode"],
                         ),
                         legend_format="{{key_mode}}_skipped",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_sum_rate(
@@ -3585,6 +3875,7 @@ def GC() -> RowPanel:
                             by_labels=["key_mode"],
                         ),
                         legend_format="{{key_mode}}_mvcc-rollback/mvcc-lock",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_sum_rate(
@@ -3592,6 +3883,7 @@ def GC() -> RowPanel:
                             by_labels=["key_mode"],
                         ),
                         legend_format="{{key_mode}}_orphan-versions",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_sum_rate(
@@ -3599,6 +3891,7 @@ def GC() -> RowPanel:
                             by_labels=["key_mode"],
                         ),
                         legend_format="{{key_mode}}_performed-times",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_sum_rate(
@@ -3606,6 +3899,7 @@ def GC() -> RowPanel:
                             by_labels=["key_mode", "type"],
                         ),
                         legend_format="{{key_mode}}_failure-{{type}}",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_sum_rate(
@@ -3613,6 +3907,7 @@ def GC() -> RowPanel:
                             by_labels=["key_mode"],
                         ),
                         legend_format="{{key_mode}}_mvcc-deletion-met",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_sum_rate(
@@ -3620,6 +3915,7 @@ def GC() -> RowPanel:
                             by_labels=["key_mode"],
                         ),
                         legend_format="{{key_mode}}_mvcc-deletion-handled",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_sum_rate(
@@ -3627,6 +3923,7 @@ def GC() -> RowPanel:
                             by_labels=["key_mode"],
                         ),
                         legend_format="{{key_mode}}_mvcc-deletion-wasted",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -3644,6 +3941,7 @@ def GC() -> RowPanel:
                             label_selectors=['cf="write"'],
                             by_labels=["key_mode", "tag"],
                         ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -3657,6 +3955,7 @@ def GC() -> RowPanel:
                             label_selectors=['cf="default"'],
                             by_labels=["key_mode", "tag"],
                         ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -3692,6 +3991,7 @@ def Snapshot() -> RowPanel:
                             "tikv_raftstore_snapshot_traffic_total",
                             by_labels=["type"],
                         ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -3733,6 +4033,7 @@ def Snapshot() -> RowPanel:
                             "tikv_server_send_snapshot_duration_seconds",
                         ),
                         legend_format="send",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_histogram_quantile(
@@ -3741,6 +4042,7 @@ def Snapshot() -> RowPanel:
                             label_selectors=['type="apply"'],
                         ),
                         legend_format="apply",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_histogram_quantile(
@@ -3749,6 +4051,7 @@ def Snapshot() -> RowPanel:
                             label_selectors=['type="generate"'],
                         ),
                         legend_format="generate",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -3767,6 +4070,7 @@ def Snapshot() -> RowPanel:
                             "tikv_snapshot_size",
                         ),
                         legend_format="size",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -3780,6 +4084,7 @@ def Snapshot() -> RowPanel:
                             "tikv_snapshot_kv_count",
                         ),
                         legend_format="count",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -3798,6 +4103,7 @@ def Snapshot() -> RowPanel:
                             range_selector="1m",
                             by_labels=["type", "status"],
                         ),
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_sum_delta(
@@ -3806,6 +4112,16 @@ def Snapshot() -> RowPanel:
                             by_labels=["type", "status"],
                         ),
                         legend_format="clean-region-by-{{type}}",
+                        additional_groupby=True,
+                    ),
+                    target(
+                        expr=expr_sum_delta(
+                            "tikv_server_snapshot_task_total",
+                            range_selector="1m",
+                            by_labels=["type"],
+                        ),
+                        legend_format="{{type}}",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -3817,14 +4133,17 @@ def Snapshot() -> RowPanel:
                     target(
                         expr=expr_sum_rate(
                             "tikv_snapshot_limit_transport_bytes",
+                            label_selectors=['type!~"send"'],
                             by_labels=["instance", "type"],
-                        ),
+                        )
                     ),
                     target(
                         expr=expr_sum_rate(
                             "tikv_snapshot_limit_generate_bytes",
+                            label_selectors=['type=~"io"'],
+                            by_labels=["instance", "type"],
                         ),
-                        legend_format="{{instance}}-generate",
+                        legend_format="{{instance}}-generate-{{type}}",
                     ),
                 ],
             ),
@@ -3864,6 +4183,7 @@ def Task() -> RowPanel:
                             "tikv_worker_handled_task_total",
                             by_labels=["name"],
                         ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -3876,6 +4196,7 @@ def Task() -> RowPanel:
                             "tikv_worker_pending_task_total",
                             by_labels=["name"],
                         ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -3893,6 +4214,7 @@ def Task() -> RowPanel:
                             "tikv_futurepool_handled_task_total",
                             by_labels=["name"],
                         ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -3907,6 +4229,7 @@ def Task() -> RowPanel:
                             range_selector="1m",
                             by_labels=["name"],
                         ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -3939,6 +4262,7 @@ def CoprocessorOverview() -> RowPanel:
                             "tikv_coprocessor_request_duration_seconds_count",
                             by_labels=["req"],
                         ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -3951,6 +4275,7 @@ def CoprocessorOverview() -> RowPanel:
                             "tikv_coprocessor_request_error",
                             by_labels=["reason"],
                         ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -3966,6 +4291,7 @@ def CoprocessorOverview() -> RowPanel:
                             "tikv_coprocessor_scan_keys_sum",
                             by_labels=["req"],
                         ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -3991,6 +4317,7 @@ def CoprocessorOverview() -> RowPanel:
                             by_labels=["req"],
                         ),
                         legend_format="delete_skipped-{{req}}",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -4048,6 +4375,7 @@ def CoprocessorDetail() -> RowPanel:
                 by_labels=["req", "instance"],
                 hide_avg=True,
                 hide_count=True,
+                additional_groupby=False,
             ),
         ]
     )
@@ -4072,6 +4400,7 @@ def CoprocessorDetail() -> RowPanel:
                 by_labels=["req", "instance"],
                 hide_avg=True,
                 hide_count=True,
+                additional_groupby=False,
             ),
         ]
     )
@@ -4085,6 +4414,7 @@ def CoprocessorDetail() -> RowPanel:
                             "tikv_coprocessor_dag_request_count",
                             by_labels=["vec_type"],
                         ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -4098,6 +4428,7 @@ def CoprocessorDetail() -> RowPanel:
                             "tikv_coprocessor_executor_count",
                             by_labels=["type"],
                         ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -4112,9 +4443,12 @@ def CoprocessorDetail() -> RowPanel:
                     target(
                         expr=expr_sum_rate(
                             "tikv_coprocessor_scan_details",
-                            label_selectors=['req=~"select|select_by_range_cache"'],
+                            label_selectors=[
+                                'req=~"select|select_by_in_memory_engine"'
+                            ],
                             by_labels=["tag"],
                         ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -4125,9 +4459,10 @@ def CoprocessorDetail() -> RowPanel:
                     target(
                         expr=expr_sum_rate(
                             "tikv_coprocessor_scan_details",
-                            label_selectors=['req=~"index|index_by_range_cache"'],
+                            label_selectors=['req=~"index|index_by_in_memory_engine"'],
                             by_labels=["tag"],
                         ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -4142,9 +4477,12 @@ def CoprocessorDetail() -> RowPanel:
                     target(
                         expr=expr_sum_rate(
                             "tikv_coprocessor_scan_details",
-                            label_selectors=['req=~"select|select_by_range_cache"'],
+                            label_selectors=[
+                                'req=~"select|select_by_in_memory_engine"'
+                            ],
                             by_labels=["cf", "tag"],
                         ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -4155,9 +4493,10 @@ def CoprocessorDetail() -> RowPanel:
                     target(
                         expr=expr_sum_rate(
                             "tikv_coprocessor_scan_details",
-                            label_selectors=['req=~"index|index_by_range_cache"'],
+                            label_selectors=['req=~"index|index_by_in_memory_engine"'],
                             by_labels=["cf", "tag"],
                         ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -4176,43 +4515,133 @@ def CoprocessorDetail() -> RowPanel:
     return layout.row_panel
 
 
-def RangeCacheMemoryEngine() -> RowPanel:
-    layout = Layout(title="Range Cache Memory Engine")
+def InMemoryEngine() -> RowPanel:
+    layout = Layout(title="In Memory Engine")
     layout.row(
         [
             graph_panel(
-                title="Snapshot Type Count",
-                description="Count of each snapshot type",
+                title="OPS",
+                description="Operation per second for cf",
+                yaxes=yaxes(left_format=UNITS.OPS_PER_SEC),
+                targets=[
+                    target(
+                        expr=expr_sum_rate(
+                            "tikv_in_memory_engine_kv_operations",
+                            by_labels=["instance", "type"],
+                        ),
+                        legend_format="{{type}}-{{instance}}",
+                        additional_groupby=True,
+                    ),
+                ],
+            ),
+            graph_panel(
+                title="Read MBps",
+                description="The total bytes of read in RocksDB and in-memory engine(the same with panel Cluster/MBps for read)",
+                yaxes=yaxes(left_format=UNITS.BYTES_IEC),
+                targets=[
+                    target(
+                        expr=expr_sum_rate(
+                            "tikv_engine_flow_bytes",
+                            label_selectors=['type=~"bytes_read|iter_bytes_read"'],
+                        ),
+                        legend_format=r"rocksdb-{{instance}}",
+                    ),
+                    target(
+                        expr=expr_sum_rate(
+                            "tikv_in_memory_engine_flow",
+                            label_selectors=['type=~"bytes_read|iter_bytes_read"'],
+                        ),
+                        legend_format=r"in-memory-engine-{{instance}}",
+                    ),
+                ],
+            ),
+            graph_panel_histogram_quantiles(
+                title="Coprocessor Handle duration",
+                description="The time consumed when handling coprocessor requests",
+                yaxes=yaxes(left_format=UNITS.SECONDS),
+                metric="tikv_coprocessor_request_handle_seconds",
+                by_labels=["req"],
+                hide_avg=True,
+                hide_count=True,
+            ),
+        ]
+    )
+    layout.row(
+        [
+            graph_panel(
+                title="Region Cache Hit",
+                description="Count of region cache hit",
                 targets=[
                     target(
                         expr=expr_sum_rate(
                             "tikv_snapshot_type_count",
-                            by_labels=["type"],
+                            label_selectors=['type="in_memory_engine"'],
+                            by_labels=["instance"],
                         ),
-                        legend_format="{{type}}",
+                        legend_format="count-{{instance}}",
                     ),
                 ],
             ),
             graph_panel(
-                title="Snapshot Failed Reason",
-                description="Reasons for why rance cache snapshot is not acquired",
+                title="Region Cache Hit Rate",
+                description="Region cache hit rate",
+                yaxes=yaxes(left_format=UNITS.PERCENT_UNIT),
+                targets=[
+                    target(
+                        expr=expr_operator(
+                            expr_sum_rate(
+                                "tikv_snapshot_type_count",
+                                label_selectors=['type="in_memory_engine"'],
+                                by_labels=["instance"],
+                            ),
+                            "/",
+                            expr_sum_rate(
+                                "tikv_snapshot_type_count",
+                                by_labels=["instance"],
+                            ),
+                        ),
+                        legend_format="rate-{{instance}}",
+                        additional_groupby=True,
+                    ),
+                ],
+            ),
+            graph_panel(
+                title="Region Cache Miss Reason",
+                description="Reasons for region cache miss",
                 targets=[
                     target(
                         expr=expr_sum_rate(
-                            "tikv_range_cache_snapshot_acquire_failed_reason_count",
-                            by_labels=["type"],
+                            "tikv_in_memory_engine_snapshot_acquire_failed_reason_count",
+                            by_labels=["instance", "type"],
                         ),
-                        legend_format="{{type}}",
+                        legend_format="{{type}}-{{instance}}",
+                    ),
+                ],
+            ),
+        ]
+    )
+    layout.row(
+        [
+            graph_panel(
+                title="Memory Usage",
+                description="The memory usage of the in-memory engine",
+                yaxes=yaxes(left_format=UNITS.BYTES_IEC),
+                targets=[
+                    target(
+                        expr=expr_avg(
+                            "tikv_in_memory_engine_memory_usage_bytes",
+                            by_labels=["instance"],
+                        ),
                     ),
                 ],
             ),
             graph_panel(
-                title="Range Count",
-                description="The count of different types of range",
+                title="Region Count",
+                description="The count of different types of region",
                 targets=[
                     target(
                         expr=expr_avg(
-                            "tikv_range_cache_count",
+                            "tikv_in_memory_engine_cache_count",
                             by_labels=["instance", "type"],
                         ),
                         legend_format="{{instance}}--{{type}}",
@@ -4224,55 +4653,43 @@ def RangeCacheMemoryEngine() -> RowPanel:
     layout.row(
         [
             graph_panel(
-                title="Memory Usage",
-                description="The memory usage of the range cache memory engine",
-                yaxes=yaxes(left_format=UNITS.BYTES_IEC),
-                targets=[
-                    target(
-                        expr=expr_avg(
-                            "tikv_range_cache_memory_usage_bytes",
-                            by_labels=["instance"],
-                        ),
-                    ),
-                ],
-            ),
-            graph_panel(
                 title="GC Filter",
                 description="Rang cache engine garbage collection information",
                 targets=[
                     target(
                         expr=expr_sum_rate(
-                            "tikv_range_cache_memory_engine_gc_filtered",
+                            "tikv_in_memory_engine_gc_filtered",
                             by_labels=["type"],
                         ),
                         legend_format="{{type}}",
+                        additional_groupby=True,
                     ),
                 ],
             ),
             heatmap_panel(
-                title="Range GC Duration",
-                description="The handle duration of range gc",
+                title="Region GC Duration",
+                description="The handle duration of region gc",
                 yaxis=yaxis(format=UNITS.SECONDS),
-                metric="tikv_range_gc_duration_secs_bucket",
+                metric="tikv_in_memory_engine_gc_duration_secs_bucket",
             ),
         ]
     )
     layout.row(
         [
             heatmap_panel(
-                title="Range Load Duration",
-                description="The handle duration of range load",
+                title="Region Load Duration",
+                description="The handle duration of region load",
                 yaxis=yaxis(format=UNITS.SECONDS),
-                metric="tikv_range_load_duration_secs_bucket",
+                metric="tikv_in_memory_engine_load_duration_secs_bucket",
             ),
             graph_panel(
-                title="Range Load Count",
-                description="The count of range loading per seconds",
+                title="Region Load Count",
+                description="The count of region loading per seconds",
                 yaxes=yaxes(left_format=UNITS.OPS_PER_SEC),
                 targets=[
                     target(
-                        expr=expr_sum_rate(
-                            "tikv_range_load_duration_secs_count",
+                        expr=expr_sum_delta(
+                            "tikv_in_memory_engine_load_duration_secs_count",
                             by_labels=["instance"],
                         ),
                         legend_format="{{instance}}",
@@ -4284,22 +4701,23 @@ def RangeCacheMemoryEngine() -> RowPanel:
     layout.row(
         [
             heatmap_panel(
-                title="Range Eviction Duration",
-                description="The handle duration of range eviction",
+                title="Region Eviction Duration",
+                description="The handle duration of region eviction",
                 yaxis=yaxis(format=UNITS.SECONDS),
-                metric="tikv_range_eviction_duration_secs_bucket",
+                metric="tikv_in_memory_engine_eviction_duration_secs_bucket",
             ),
             graph_panel(
-                title="Range Eviction Count",
-                description="The count of range eviction per seconds",
+                title="Region Eviction Count",
+                description="The count of region eviction per seconds",
                 yaxes=yaxes(left_format=UNITS.OPS_PER_SEC),
                 targets=[
                     target(
-                        expr=expr_sum_rate(
-                            "tikv_range_eviction_duration_secs_count",
+                        expr=expr_sum_delta(
+                            "tikv_in_memory_engine_eviction_duration_secs_count",
                             by_labels=["type"],
                         ),
                         legend_format="{{type}}",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -4308,25 +4726,25 @@ def RangeCacheMemoryEngine() -> RowPanel:
     layout.row(
         heatmap_panel_graph_panel_histogram_quantile_pairs(
             heatmap_title="Write duration",
-            heatmap_description="The time consumed of write in range cache engine",
-            graph_title="99% Range cache engine write duration per server",
-            graph_description="The time consumed of write in range cache engine per TiKV instance",
+            heatmap_description="The time consumed of write in region cache engine",
+            graph_title="99% In-memory engine write duration per server",
+            graph_description="The time consumed of write in region cache engine per TiKV instance",
             graph_by_labels=["instance"],
             graph_hides=["count", "avg"],
             yaxis_format=UNITS.SECONDS,
-            metric="tikv_range_cache_engine_write_duration_seconds",
+            metric="tikv_in_memory_engine_write_duration_seconds",
         )
     )
     layout.row(
         heatmap_panel_graph_panel_histogram_quantile_pairs(
             heatmap_title="Prepare for write duration",
-            heatmap_description="The time consumed of prepare for write in range cache engine",
-            graph_title="99% Range cache engine prepare for write duration per server",
-            graph_description="The time consumed of prepare for write in range cache engine per TiKV instance",
+            heatmap_description="The time consumed of prepare for write in the in-memory engine",
+            graph_title="99% In-memory engine prepare for write duration per server",
+            graph_description="The time consumed of prepare for write in the in-memory engine per TiKV instance",
             graph_by_labels=["instance"],
             graph_hides=["count", "avg"],
             yaxis_format=UNITS.SECONDS,
-            metric="tikv_range_cache_engine_prepare_for_write_duration_seconds",
+            metric="tikv_in_memory_engine_prepare_for_write_duration_seconds",
         )
     )
     layout.row(
@@ -4338,63 +4756,69 @@ def RangeCacheMemoryEngine() -> RowPanel:
                 targets=[
                     target(
                         expr=expr_sum_rate(
-                            "tikv_range_cache_memory_engine_locate",
+                            "tikv_in_memory_engine_locate",
                             label_selectors=[
                                 'type="number_db_seek"',
                             ],
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="seek",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_sum_rate(
-                            "tikv_range_cache_memory_engine_locate",
+                            "tikv_in_memory_engine_locate",
                             label_selectors=[
                                 'type="number_db_seek_found"',
                             ],
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="seek_found",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_sum_rate(
-                            "tikv_range_cache_memory_engine_locate",
+                            "tikv_in_memory_engine_locate",
                             label_selectors=[
                                 'type="number_db_next"',
                             ],
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="next",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_sum_rate(
-                            "tikv_range_cache_memory_engine_locate",
+                            "tikv_in_memory_engine_locate",
                             label_selectors=[
                                 'type="number_db_next_found"',
                             ],
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="next_found",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_sum_rate(
-                            "tikv_range_cache_memory_engine_locate",
+                            "tikv_in_memory_engine_locate",
                             label_selectors=[
                                 'type="number_db_prev"',
                             ],
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="prev",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_sum_rate(
-                            "tikv_range_cache_memory_engine_locate",
+                            "tikv_in_memory_engine_locate",
                             label_selectors=[
                                 'type="number_db_prev_found"',
                             ],
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="prev_found",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -4406,30 +4830,111 @@ def RangeCacheMemoryEngine() -> RowPanel:
                     target(
                         expr=expr_histogram_quantile(
                             1,
-                            "tikv_range_cache_memory_engine_seek_duration",
+                            "tikv_in_memory_engine_seek_duration",
                         ),
                         legend_format="max",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_histogram_quantile(
                             0.99,
-                            "tikv_range_cache_memory_engine_seek_duration",
+                            "tikv_in_memory_engine_seek_duration",
                         ),
                         legend_format="99%",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_histogram_quantile(
                             0.95,
-                            "tikv_range_cache_memory_engine_seek_duration",
+                            "tikv_in_memory_engine_seek_duration",
                         ),
                         legend_format="95%",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_histogram_avg(
-                            "tikv_range_cache_memory_engine_seek_duration",
+                            "tikv_in_memory_engine_seek_duration",
                             by_labels=["type"],
                         ),
                         legend_format="avg",
+                        additional_groupby=True,
+                    ),
+                ],
+            ),
+        ]
+    )
+    layout.row(
+        [
+            graph_panel(
+                title="Oldest Auto GC SafePoint",
+                description="Unlike the auto gc safe point used for TiKV, the safe point for in-memory engine is per region and this is the oldest one",
+                yaxes=yaxes(left_format=UNITS.DATE_TIME_ISO),
+                targets=[
+                    target(
+                        expr=expr_max(
+                            "tikv_in_memory_engine_oldest_safe_point",
+                        )
+                        .extra("/ (2^18)")
+                        .skip_default_instance_selector(),
+                        additional_groupby=True,
+                    ),
+                ],
+            ),
+            graph_panel(
+                title="Newest Auto GC SafePoint",
+                description="Unlike the auto gc safe point used for TiKV, the safe point for in-memory engine is per region and this is the newest one",
+                yaxes=yaxes(left_format=UNITS.DATE_TIME_ISO),
+                targets=[
+                    target(
+                        expr=expr_max(
+                            "tikv_in_memory_engine_newest_safe_point",
+                        )
+                        .extra("/ (2^18)")
+                        .skip_default_instance_selector(),
+                        additional_groupby=True,
+                    ),
+                ],
+            ),
+        ]
+    )
+    layout.row(
+        [
+            graph_panel(
+                title="Auto GC SafePoint Gap",
+                description="The gap between newest auto gc safe point and oldest auto gc safe point of regions cached in the in-memroy engine",
+                yaxes=yaxes(left_format=UNITS.MILLI_SECONDS),
+                targets=[
+                    target(
+                        expr=expr_operator(
+                            expr_sum(
+                                "tikv_in_memory_engine_newest_safe_point",
+                            )
+                            .extra("/ (2^18)")
+                            .skip_default_instance_selector(),
+                            "-",
+                            expr_sum(
+                                "tikv_in_memory_engine_oldest_safe_point",
+                            )
+                            .extra("/ (2^18)")
+                            .skip_default_instance_selector(),
+                        ),
+                        additional_groupby=True,
+                        legend_format="{{instance}}",
+                    ),
+                ],
+            ),
+            graph_panel(
+                title="Auto GC SafePoint Gap With TiKV",
+                description="The gap between tikv auto gc safe point and in-memory engine oldest auto gc safe point",
+                yaxes=yaxes(left_format=UNITS.MILLI_SECONDS),
+                targets=[
+                    target(
+                        expr=expr_max(
+                            "tikv_safe_point_gap_with_in_memory_engine",
+                        )
+                        .extra("/ (2^18)")
+                        .skip_default_instance_selector(),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -4474,6 +4979,7 @@ def Threads() -> RowPanel:
                             ).extra("> 1024"),
                         ),
                         legend_format="{{name}}",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -4537,6 +5043,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="memtable",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_sum_rate(
@@ -4548,6 +5055,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="block_cache",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_sum_rate(
@@ -4559,6 +5067,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="l0",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_sum_rate(
@@ -4570,6 +5079,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="l1",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_sum_rate(
@@ -4581,6 +5091,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="l2_and_up",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -4599,6 +5110,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="max",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_avg(
@@ -4610,6 +5122,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="99%",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_avg(
@@ -4621,6 +5134,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="95%",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_avg(
@@ -4632,6 +5146,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="avg",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -4654,6 +5169,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="seek",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_sum_rate(
@@ -4665,6 +5181,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="seek_found",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_sum_rate(
@@ -4676,6 +5193,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="next",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_sum_rate(
@@ -4687,6 +5205,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="next_found",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_sum_rate(
@@ -4698,6 +5217,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="prev",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_sum_rate(
@@ -4709,6 +5229,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="prev_found",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -4727,6 +5248,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="max",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_avg(
@@ -4738,6 +5260,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="99%",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_avg(
@@ -4749,6 +5272,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="95%",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_avg(
@@ -4760,6 +5284,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="avg",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -4782,6 +5307,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="done",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_sum_rate(
@@ -4793,6 +5319,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="timeout",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_sum_rate(
@@ -4804,6 +5331,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="with_wal",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -4822,6 +5350,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="max",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_avg(
@@ -4833,6 +5362,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="99%",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_avg(
@@ -4844,6 +5374,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="95%",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_avg(
@@ -4855,6 +5386,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="avg",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -4876,6 +5408,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="sync",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -4894,6 +5427,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="max",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_avg(
@@ -4905,6 +5439,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="99%",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_avg(
@@ -4916,6 +5451,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="95%",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_avg(
@@ -4927,6 +5463,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="avg",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -4936,8 +5473,8 @@ def RocksDB() -> RowPanel:
         [
             graph_panel(
                 title="Compaction operations",
-                description="The count of compaction and flush operations",
-                yaxes=yaxes(left_format=UNITS.OPS_PER_SEC),
+                description="The rate of completed compaction and flush operations (left axis) and the count of running operations (right axis).",
+                yaxes=yaxes(left_format=UNITS.OPS_PER_SEC, right_format=UNITS.SHORT),
                 targets=[
                     target(
                         expr=expr_sum_rate(
@@ -4947,6 +5484,35 @@ def RocksDB() -> RowPanel:
                             ],
                             by_labels=["type"],
                         ),
+                        additional_groupby=True,
+                    ),
+                    target(
+                        expr=expr_sum(
+                            "tikv_engine_num_running_compactions",
+                            label_selectors=[
+                                'db="$db"',
+                            ],
+                            by_labels=[],  # override default by instance.
+                        ),
+                        legend_format="running-compactions",
+                        additional_groupby=True,
+                    ),
+                    target(
+                        expr=expr_sum(
+                            "tikv_engine_num_running_flushes",
+                            label_selectors=[
+                                'db="$db"',
+                            ],
+                            by_labels=[],  # override default by instance.
+                        ),
+                        legend_format="running-flushes",
+                        additional_groupby=True,
+                    ),
+                ],
+                series_overrides=[
+                    series_override(
+                        alias="/running-.*/",
+                        yaxis=2,
                     ),
                 ],
             ),
@@ -4965,6 +5531,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="max",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_avg(
@@ -4976,6 +5543,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="99%",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_avg(
@@ -4987,6 +5555,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="95%",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_avg(
@@ -4998,6 +5567,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="avg",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -5018,6 +5588,7 @@ def RocksDB() -> RowPanel:
                             ],
                             by_labels=["cf", " type"],
                         ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -5036,6 +5607,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="max",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_avg(
@@ -5047,6 +5619,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="99%",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_avg(
@@ -5058,6 +5631,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="95%",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_avg(
@@ -5069,6 +5643,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="avg",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -5087,6 +5662,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="max",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_avg(
@@ -5098,6 +5674,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="99%",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_avg(
@@ -5109,6 +5686,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="95%",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_avg(
@@ -5120,6 +5698,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="avg",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -5142,6 +5721,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="max",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_avg(
@@ -5153,6 +5733,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="99%",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_avg(
@@ -5164,6 +5745,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="95%",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_avg(
@@ -5175,6 +5757,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="avg",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -5191,6 +5774,7 @@ def RocksDB() -> RowPanel:
                             ],
                             by_labels=["cf", "reason"],
                         ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -5256,6 +5840,7 @@ def RocksDB() -> RowPanel:
                             ),
                         ),
                         legend_format="hit",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -5278,6 +5863,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="total_read",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_sum_rate(
@@ -5289,6 +5875,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="total_written",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_sum_rate(
@@ -5300,6 +5887,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="data_insert",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_sum_rate(
@@ -5311,6 +5899,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="filter_insert",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_sum_rate(
@@ -5322,6 +5911,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="filter_evict",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_sum_rate(
@@ -5333,6 +5923,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="index_insert",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_sum_rate(
@@ -5344,6 +5935,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="index_evict",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -5384,6 +5976,7 @@ def RocksDB() -> RowPanel:
                             ),
                         ),
                         legend_format="all",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_operator(
@@ -5417,6 +6010,7 @@ def RocksDB() -> RowPanel:
                             ),
                         ),
                         legend_format="data",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_operator(
@@ -5450,6 +6044,7 @@ def RocksDB() -> RowPanel:
                             ),
                         ),
                         legend_format="filter",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_operator(
@@ -5483,28 +6078,74 @@ def RocksDB() -> RowPanel:
                             ),
                         ),
                         legend_format="index",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_operator(
-                            expr_sum_rate(
-                                "tikv_engine_bloom_efficiency",
-                                label_selectors=[
-                                    'db="$db"',
-                                    'type="bloom_prefix_useful"',
-                                ],
-                                by_labels=[],  # override default by instance.
+                            expr_operator(
+                                expr_sum_rate(
+                                    "tikv_engine_bloom_efficiency",
+                                    label_selectors=[
+                                        'db="$db"',
+                                        'type="last_level_seek_filtered"',
+                                    ],
+                                    by_labels=[],  # override default by instance.
+                                ),
+                                "+",
+                                expr_sum_rate(
+                                    "tikv_engine_bloom_efficiency",
+                                    label_selectors=[
+                                        'db="$db"',
+                                        'type="non_last_level_seek_filtered"',
+                                    ],
+                                    by_labels=[],  # override default by instance.
+                                ),
                             ),
                             "/",
-                            expr_sum_rate(
-                                "tikv_engine_bloom_efficiency",
-                                label_selectors=[
-                                    'db="$db"',
-                                    'type="bloom_prefix_checked"',
-                                ],
-                                by_labels=[],  # override default by instance.
+                            expr_operator(
+                                expr_operator(
+                                    expr_sum_rate(
+                                        "tikv_engine_bloom_efficiency",
+                                        label_selectors=[
+                                            'db="$db"',
+                                            'type="last_level_seek_filtered"',
+                                        ],
+                                        by_labels=[],  # override default by instance.
+                                    ),
+                                    "+",
+                                    expr_sum_rate(
+                                        "tikv_engine_bloom_efficiency",
+                                        label_selectors=[
+                                            'db="$db"',
+                                            'type="non_last_level_seek_filtered"',
+                                        ],
+                                        by_labels=[],  # override default by instance.
+                                    ),
+                                ),
+                                "+",
+                                expr_operator(
+                                    expr_sum_rate(
+                                        "tikv_engine_bloom_efficiency",
+                                        label_selectors=[
+                                            'db="$db"',
+                                            'type="last_level_seek_filter_match"',
+                                        ],
+                                        by_labels=[],  # override default by instance.
+                                    ),
+                                    "+",
+                                    expr_sum_rate(
+                                        "tikv_engine_bloom_efficiency",
+                                        label_selectors=[
+                                            'db="$db"',
+                                            'type="non_last_level_seek_filter_match"',
+                                        ],
+                                        by_labels=[],  # override default by instance.
+                                    ),
+                                ),
                             ),
                         ),
                         legend_format="bloom prefix",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -5527,6 +6168,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="read",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_sum_rate(
@@ -5538,6 +6180,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="written",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_sum_rate(
@@ -5548,6 +6191,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="corrupt",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -5566,6 +6210,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="total_add",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_sum_rate(
@@ -5577,6 +6222,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="data_add",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_sum_rate(
@@ -5588,6 +6234,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="filter_add",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_sum_rate(
@@ -5599,6 +6246,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="index_add",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_sum_rate(
@@ -5610,6 +6258,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="add_failures",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -5632,6 +6281,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="get",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_sum_rate(
@@ -5643,6 +6293,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="scan",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -5659,6 +6310,7 @@ def RocksDB() -> RowPanel:
                             ],
                             by_labels=["cf"],
                         ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -5681,6 +6333,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="wal",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_sum_rate(
@@ -5692,6 +6345,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="write",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -5710,6 +6364,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="max",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_avg(
@@ -5721,6 +6376,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="99%",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_avg(
@@ -5732,6 +6388,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="95%",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_avg(
@@ -5743,6 +6400,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="avg",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -5765,6 +6423,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="read",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_sum_rate(
@@ -5776,6 +6435,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="written",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_sum_rate(
@@ -5787,6 +6447,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="flushed",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -5802,6 +6463,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="max",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_avg(
@@ -5813,6 +6475,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="99%",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_avg(
@@ -5824,6 +6487,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="95%",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_avg(
@@ -5835,6 +6499,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="avg",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -5881,6 +6546,7 @@ def RocksDB() -> RowPanel:
                             by_labels=["cf"],
                         ),
                         legend_format="{{cf}}",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -5914,6 +6580,7 @@ def RocksDB() -> RowPanel:
                             by_labels=["cf", "level"],
                         ),
                         legend_format="{{cf}}-L{{level}}",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -5933,6 +6600,7 @@ def RocksDB() -> RowPanel:
                             by_labels=["cf", "level"],
                         ),
                         legend_format="{{cf}}-L{{level}}",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -5974,6 +6642,24 @@ def RocksDB() -> RowPanel:
     layout.row(
         [
             graph_panel(
+                title="Ingest SST allow_write",
+                description=None,
+                yaxes=yaxes(left_format=UNITS.SHORT),
+                targets=[
+                    target(
+                        expr=expr_sum_rate(
+                            "tikv_storage_ingest_external_file_allow_write_counter",
+                            by_labels=["type"],
+                        ),
+                        additional_groupby=True,
+                    ),
+                ],
+            ),
+        ]
+    )
+    layout.row(
+        [
+            graph_panel(
                 title="Write Stall Reason",
                 description=None,
                 yaxes=yaxes(left_format=UNITS.SHORT),
@@ -5984,6 +6670,7 @@ def RocksDB() -> RowPanel:
                             label_selectors=['db="$db"'],
                             by_labels=["type"],
                         ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -5999,6 +6686,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="max",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_avg(
@@ -6010,6 +6698,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="99%",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_avg(
@@ -6021,6 +6710,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="95%",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_avg(
@@ -6029,6 +6719,7 @@ def RocksDB() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="avg",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -6061,6 +6752,7 @@ def RocksDB() -> RowPanel:
                             label_selectors=['db="$db"', 'type="mem-tables-all"'],
                             by_labels=["cf"],
                         ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -6084,6 +6776,7 @@ def RaftEngine() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="write",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_sum_rate(
@@ -6091,6 +6784,7 @@ def RaftEngine() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="read_entry",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_sum_rate(
@@ -6098,6 +6792,7 @@ def RaftEngine() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="read_message",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -6123,6 +6818,7 @@ def RaftEngine() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="write",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_sum_rate(
@@ -6130,6 +6826,7 @@ def RaftEngine() -> RowPanel:
                             by_labels=["type"],
                         ),
                         legend_format="rewrite-{{type}}",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -6143,18 +6840,21 @@ def RaftEngine() -> RowPanel:
                             0.99, "raft_engine_write_preprocess_duration_seconds"
                         ),
                         legend_format="wait",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_histogram_quantile(
                             0.99, "raft_engine_write_leader_duration_seconds"
                         ),
                         legend_format="wal",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_histogram_quantile(
                             0.99, "raft_engine_write_apply_duration_seconds"
                         ),
                         legend_format="apply",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -6179,24 +6879,28 @@ def RaftEngine() -> RowPanel:
                             0.999, "raft_engine_write_leader_duration_seconds"
                         ),
                         legend_format="total",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_histogram_quantile(
                             0.999, "raft_engine_sync_log_duration_seconds"
                         ),
                         legend_format="sync",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_histogram_quantile(
                             0.999, "raft_engine_allocate_log_duration_seconds"
                         ),
                         legend_format="allocate",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_histogram_quantile(
                             0.999, "raft_engine_rotate_log_duration_seconds"
                         ),
                         legend_format="rotate",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -6214,6 +6918,7 @@ def RaftEngine() -> RowPanel:
                             "raft_engine_log_file_count",
                             by_labels=["type"],
                         ),
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_avg(
@@ -6221,6 +6926,7 @@ def RaftEngine() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="swap",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_avg(
@@ -6228,6 +6934,7 @@ def RaftEngine() -> RowPanel:
                             by_labels=["type"],
                         ),
                         legend_format="{{type}}-recycle",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -6241,18 +6948,21 @@ def RaftEngine() -> RowPanel:
                             0.999, "raft_engine_read_entry_duration_seconds"
                         ),
                         legend_format="read_entry",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_histogram_quantile(
                             0.999, "raft_engine_read_message_duration_seconds"
                         ),
                         legend_format="read_message",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_histogram_quantile(
                             0.999, "raft_engine_purge_duration_seconds"
                         ),
                         legend_format="purge",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -6270,6 +6980,7 @@ def RaftEngine() -> RowPanel:
                             "raft_engine_log_entry_count",
                             by_labels=["type"],
                         ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -6298,6 +7009,7 @@ def Titan() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="live blob file num",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_sum(
@@ -6306,6 +7018,7 @@ def Titan() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="obsolete blob file num",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -6320,6 +7033,7 @@ def Titan() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="live blob file size",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_sum(
@@ -6328,6 +7042,7 @@ def Titan() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="obsolete blob file size",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -6391,6 +7106,7 @@ def Titan() -> RowPanel:
                             ),
                         ),
                         legend_format="all",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -6411,6 +7127,7 @@ def Titan() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="avg",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_avg(
@@ -6422,6 +7139,7 @@ def Titan() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="95%",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_avg(
@@ -6433,6 +7151,7 @@ def Titan() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="99%",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_max(
@@ -6444,6 +7163,7 @@ def Titan() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="max",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -6465,6 +7185,7 @@ def Titan() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="avg",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_avg(
@@ -6476,6 +7197,7 @@ def Titan() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="95%",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_avg(
@@ -6487,6 +7209,7 @@ def Titan() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="99%",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_max(
@@ -6498,6 +7221,7 @@ def Titan() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="max",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -6515,6 +7239,7 @@ def Titan() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="avg",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_avg(
@@ -6526,6 +7251,7 @@ def Titan() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="95%",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_avg(
@@ -6537,6 +7263,7 @@ def Titan() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="99%",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_max(
@@ -6548,6 +7275,7 @@ def Titan() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="max",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -6569,6 +7297,7 @@ def Titan() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="get",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -6583,6 +7312,7 @@ def Titan() -> RowPanel:
                             by_labels=["type"],
                         ),
                         legend_format="avg-{{type}}",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_avg(
@@ -6594,6 +7324,7 @@ def Titan() -> RowPanel:
                             by_labels=["type"],
                         ),
                         legend_format="95%-{{type}}",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_avg(
@@ -6605,6 +7336,7 @@ def Titan() -> RowPanel:
                             by_labels=["type"],
                         ),
                         legend_format="99%-{{type}}",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_max(
@@ -6613,6 +7345,7 @@ def Titan() -> RowPanel:
                             by_labels=["type"],
                         ),
                         legend_format="max-{{type}}",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -6629,6 +7362,7 @@ def Titan() -> RowPanel:
                             label_selectors=['db="$titan_db"'],
                             by_labels=["ratio"],
                         ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -6646,6 +7380,7 @@ def Titan() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="seek",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_sum_rate(
@@ -6657,6 +7392,7 @@ def Titan() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="prev",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_sum_rate(
@@ -6668,6 +7404,7 @@ def Titan() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="next",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -6686,6 +7423,7 @@ def Titan() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="avg",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_avg(
@@ -6697,6 +7435,7 @@ def Titan() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="95%",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_avg(
@@ -6708,6 +7447,7 @@ def Titan() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="99%",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_max(
@@ -6716,6 +7456,7 @@ def Titan() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="max",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -6730,6 +7471,7 @@ def Titan() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="avg",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_avg(
@@ -6741,6 +7483,7 @@ def Titan() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="95%",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_avg(
@@ -6752,6 +7495,7 @@ def Titan() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="99%",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_max(
@@ -6760,6 +7504,7 @@ def Titan() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="max",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -6778,6 +7523,7 @@ def Titan() -> RowPanel:
                             by_labels=["type"],
                         ),
                         legend_format="avg-{{type}}",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_avg(
@@ -6789,6 +7535,7 @@ def Titan() -> RowPanel:
                             by_labels=["type"],
                         ),
                         legend_format="95%-{{type}}",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_avg(
@@ -6800,6 +7547,7 @@ def Titan() -> RowPanel:
                             by_labels=["type"],
                         ),
                         legend_format="99%-{{type}}",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_max(
@@ -6808,6 +7556,7 @@ def Titan() -> RowPanel:
                             by_labels=["type"],
                         ),
                         legend_format="max-{{type}}",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -6821,6 +7570,7 @@ def Titan() -> RowPanel:
                             label_selectors=['db="$titan_db"', 'type=~"keys.*"'],
                             by_labels=["type"],
                         ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -6842,6 +7592,7 @@ def Titan() -> RowPanel:
                             by_labels=["type"],
                         ),
                         legend_format="avg",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_avg(
@@ -6853,6 +7604,7 @@ def Titan() -> RowPanel:
                             by_labels=["type"],
                         ),
                         legend_format="95%",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_avg(
@@ -6864,6 +7616,7 @@ def Titan() -> RowPanel:
                             by_labels=["type"],
                         ),
                         legend_format="99%",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_max(
@@ -6875,6 +7628,7 @@ def Titan() -> RowPanel:
                             by_labels=["type"],
                         ),
                         legend_format="max",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -6888,6 +7642,7 @@ def Titan() -> RowPanel:
                             label_selectors=['db="$titan_db"', 'type=~"bytes.*"'],
                             by_labels=["type"],
                         ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -6909,6 +7664,7 @@ def Titan() -> RowPanel:
                             by_labels=["type"],
                         ),
                         legend_format="avg",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_avg(
@@ -6920,6 +7676,7 @@ def Titan() -> RowPanel:
                             by_labels=["type"],
                         ),
                         legend_format="95%",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_avg(
@@ -6931,6 +7688,7 @@ def Titan() -> RowPanel:
                             by_labels=["type"],
                         ),
                         legend_format="99%",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_max(
@@ -6942,6 +7700,7 @@ def Titan() -> RowPanel:
                             by_labels=["type"],
                         ),
                         legend_format="max",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -6956,6 +7715,7 @@ def Titan() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="sync",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -6972,6 +7732,7 @@ def Titan() -> RowPanel:
                             label_selectors=['db="$titan_db"'],
                             by_labels=["type"],
                         ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -6989,6 +7750,7 @@ def Titan() -> RowPanel:
                             by_labels=["type"],
                         ),
                         legend_format="avg",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_avg(
@@ -7000,6 +7762,7 @@ def Titan() -> RowPanel:
                             by_labels=["type"],
                         ),
                         legend_format="95%",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_avg(
@@ -7011,6 +7774,7 @@ def Titan() -> RowPanel:
                             by_labels=["type"],
                         ),
                         legend_format="99%",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_max(
@@ -7022,6 +7786,7 @@ def Titan() -> RowPanel:
                             by_labels=["type"],
                         ),
                         legend_format="max",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -7043,6 +7808,7 @@ def Titan() -> RowPanel:
                             by_labels=["type"],
                         ),
                         legend_format="avg",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_avg(
@@ -7054,6 +7820,7 @@ def Titan() -> RowPanel:
                             by_labels=["type"],
                         ),
                         legend_format="95%",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_avg(
@@ -7065,6 +7832,7 @@ def Titan() -> RowPanel:
                             by_labels=["type"],
                         ),
                         legend_format="99%",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_max(
@@ -7076,6 +7844,7 @@ def Titan() -> RowPanel:
                             by_labels=["type"],
                         ),
                         legend_format="max",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -7089,6 +7858,7 @@ def Titan() -> RowPanel:
                             label_selectors=['db="$titan_db"', 'type=~"keys.*"'],
                             by_labels=["type"],
                         ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -7110,6 +7880,7 @@ def Titan() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="avg",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_avg(
@@ -7121,6 +7892,7 @@ def Titan() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="95%",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_avg(
@@ -7132,6 +7904,7 @@ def Titan() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="99%",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_max(
@@ -7143,6 +7916,7 @@ def Titan() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="max",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -7156,6 +7930,7 @@ def Titan() -> RowPanel:
                             label_selectors=['db="$titan_db"', 'type=~"bytes.*"'],
                             by_labels=["type"],
                         ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -7177,6 +7952,7 @@ def Titan() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="avg",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_avg(
@@ -7188,6 +7964,7 @@ def Titan() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="95%",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_avg(
@@ -7199,6 +7976,7 @@ def Titan() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="99%",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_max(
@@ -7210,6 +7988,7 @@ def Titan() -> RowPanel:
                             by_labels=[],  # override default by instance.
                         ),
                         legend_format="max",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -7223,6 +8002,7 @@ def Titan() -> RowPanel:
                             label_selectors=['db="$titan_db"'],
                             by_labels=["type"],
                         ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -7264,6 +8044,7 @@ def PessimisticLocking() -> RowPanel:
                             "tikv_lock_manager_task_counter",
                             by_labels=["type"],
                         ),
+                        additional_groupby=True,
                     )
                 ],
             ),
@@ -7289,6 +8070,7 @@ def PessimisticLocking() -> RowPanel:
                             "30s",
                             by_labels=["type"],
                         ),
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_sum_aggr_over_time(
@@ -7297,6 +8079,7 @@ def PessimisticLocking() -> RowPanel:
                             "30s",
                             by_labels=["type"],
                         ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -7319,6 +8102,7 @@ def PessimisticLocking() -> RowPanel:
                         expr=expr_sum_rate(
                             "tikv_lock_manager_error_counter", by_labels=["type"]
                         ),
+                        additional_groupby=True,
                     )
                 ],
             ),
@@ -7360,6 +8144,7 @@ def PessimisticLocking() -> RowPanel:
                         expr=expr_sum_rate(
                             "tikv_in_memory_pessimistic_locking", by_labels=["result"]
                         ),
+                        additional_groupby=True,
                     )
                 ],
             ),
@@ -7371,6 +8156,7 @@ def PessimisticLocking() -> RowPanel:
                         expr=expr_sum(
                             "tikv_lock_wait_queue_entries_gauge_vec", by_labels=["type"]
                         ),
+                        additional_groupby=True,
                     )
                 ],
             ),
@@ -7431,6 +8217,7 @@ def PointInTimeRestore() -> RowPanel:
                             ],
                         ),
                         legend_format="total-99",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_histogram_quantile(
@@ -7442,6 +8229,7 @@ def PointInTimeRestore() -> RowPanel:
                             by_labels=["le", "type"],
                         ),
                         legend_format="(DL){{type}}-99",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_histogram_quantile(
@@ -7450,6 +8238,7 @@ def PointInTimeRestore() -> RowPanel:
                             by_labels=["le", "type"],
                         ),
                         legend_format="(AP){{type}}-99",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -7907,6 +8696,7 @@ def ResolvedTS() -> RowPanel:
                             "tikv_resolved_ts_region_resolve_status",
                             by_labels=["type"],
                         ),
+                        additional_groupby=True,
                     )
                 ],
             ),
@@ -7963,6 +8753,7 @@ def Memory() -> RowPanel:
                             ),
                         ),
                         legend_format="{{thread_name}}",
+                        additional_groupby=True,
                     )
                 ],
             ),
@@ -7981,6 +8772,7 @@ def Memory() -> RowPanel:
                             label_selectors=['type="alloc"'],
                             by_labels=["thread_name"],
                         ),
+                        additional_groupby=True,
                     )
                 ],
             ),
@@ -7995,6 +8787,7 @@ def Memory() -> RowPanel:
                             label_selectors=['type="dealloc"'],
                             by_labels=["thread_name"],
                         ),
+                        additional_groupby=True,
                     )
                 ],
             ),
@@ -8012,7 +8805,8 @@ def Memory() -> RowPanel:
                             "tikv_allocator_thread_stats",
                             label_selectors=['type="mapped"'],
                             by_labels=["thread_name"],
-                        )
+                        ),
+                        additional_groupby=True,
                     )
                 ],
             ),
@@ -8024,7 +8818,7 @@ def Memory() -> RowPanel:
                         expr=expr_sum(
                             "tikv_allocator_arena_count",
                             by_labels=["instance"],
-                        )
+                        ),
                     )
                 ],
             ),
@@ -8157,6 +8951,7 @@ def BackupImport() -> RowPanel:
                             by_labels=["type"],
                         ),
                         legend_format="{{type}}-99.9%",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_histogram_quantile(
@@ -8165,6 +8960,7 @@ def BackupImport() -> RowPanel:
                             by_labels=["type"],
                         ),
                         legend_format="{{type}}-99%",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_operator(
@@ -8179,6 +8975,7 @@ def BackupImport() -> RowPanel:
                             ),
                         ),
                         legend_format="{{type}}-avg",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -8306,6 +9103,7 @@ def BackupImport() -> RowPanel:
                             label_selectors=['request!="switch_mode"'],
                             by_labels=["request"],
                         ),
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -8527,6 +9325,7 @@ def Encryption() -> RowPanel:
                             by_labels=["req"],
                         ),
                         legend_format="encrypt-{{req}}",
+                        additional_groupby=True,
                     ),
                     target(
                         expr=expr_sum_rate(
@@ -8537,6 +9336,7 @@ def Encryption() -> RowPanel:
                             by_labels=["req"],
                         ),
                         legend_format="decrypt-{{req}}",
+                        additional_groupby=True,
                     ),
                 ],
             ),
@@ -9142,6 +9942,7 @@ def SlowTrendStatistics() -> RowPanel:
                     target(
                         expr=expr_sum(
                             "tikv_raftstore_slow_score",
+                            by_labels=["instance", "type"],
                         ),
                     ),
                 ],
@@ -9228,6 +10029,41 @@ def StatusServer() -> RowPanel:
                             "tikv_status_server_request_duration_seconds_count",
                             by_labels=["path"],
                         ),
+                        additional_groupby=True,
+                    ),
+                ],
+            ),
+        ]
+    )
+    return layout.row_panel
+
+
+def ResourceControl() -> RowPanel:
+    layout = Layout(title="Resource Control")
+    layout.row(
+        [
+            graph_panel(
+                title="Background Task Total Wait Duration",
+                yaxes=yaxes(left_format=UNITS.MICRO_SECONDS),
+                targets=[
+                    target(
+                        expr=expr_sum_rate(
+                            "tikv_resource_control_background_task_wait_duration",
+                            by_labels=["instance", "resource_group"],
+                        ),
+                    ),
+                ],
+            ),
+            graph_panel(
+                title="Priority Quota Limit",
+                description="The memory usage of the resource control module.",
+                yaxes=yaxes(left_format=UNITS.MICRO_SECONDS),
+                targets=[
+                    target(
+                        expr=expr_sum(
+                            "tikv_resource_control_priority_quota_limit",
+                            by_labels=["instance", "priority"],
+                        ),
                     ),
                 ],
             ),
@@ -9272,10 +10108,11 @@ dashboard = Dashboard(
         RaftEngine(),
         RocksDB(),
         Titan(),
-        RangeCacheMemoryEngine(),
+        InMemoryEngine(),
         # Scheduler and Read Pools
         FlowControl(),
         Scheduler(),
+        SchedulerWorkerPool(),
         SchedulerCommands(),
         CoprocessorOverview(),
         CoprocessorDetail(),
@@ -9297,6 +10134,7 @@ dashboard = Dashboard(
         Threads(),
         Memory(),
         # Infrequently Used
+        ResourceControl(),
         StatusServer(),
         Encryption(),
         TTL(),

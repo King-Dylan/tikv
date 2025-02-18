@@ -1,31 +1,80 @@
 // Copyright 2024 TiKV Project Authors. Licensed under Apache-2.0.
 
-use engine_traits::{CacheRegion, KvEngine};
+use std::result;
+
+use engine_traits::{CacheRegion, FailedReason, KvEngine, RegionCacheEngine};
+use in_memory_engine::{RegionCacheMemoryEngine, RegionCacheSnapshot};
 use kvproto::metapb::Region;
 use raftstore::coprocessor::{
     dispatcher::BoxSnapshotObserver, CoprocessorHost, ObservedSnapshot, SnapshotObserver,
 };
-use range_cache_memory_engine::{RangeCacheMemoryEngine, RangeCacheSnapshot};
 
-use crate::new_in_memory_snapshot;
+use crate::metrics::{
+    IN_MEMORY_ENGINE_SNAPSHOT_ACQUIRE_FAILED_REASON_COUNT_STAIC, SNAPSHOT_TYPE_COUNT_STATIC,
+};
 
-/// RangeCacheSnapshotPin pins data of a RangeCacheMemoryEngine during taking
+/// RegionCacheSnapshotPin pins data of a RegionCacheMemoryEngine during taking
 /// snapshot. It prevents the data from being evicted or deleted from the cache.
 // TODO: Remove it, theoretically it can be remove if we don't need an
 // in-memory engine snapshot when a region is removed or splitted.
-pub struct RangeCacheSnapshotPin {
-    pub snap: Option<RangeCacheSnapshot>,
+pub struct RegionCacheSnapshotPin {
+    pub snap: Option<result::Result<RegionCacheSnapshot, FailedReason>>,
 }
 
-impl ObservedSnapshot for RangeCacheSnapshotPin {}
+impl Drop for RegionCacheSnapshotPin {
+    fn drop(&mut self) {
+        if matches!(self.snap, Some(Ok(_))) {
+            // ime snapshot is acquired successfully but not used in coprocessor request.
+            SNAPSHOT_TYPE_COUNT_STATIC.wasted.inc();
+        }
+    }
+}
+
+impl RegionCacheSnapshotPin {
+    pub fn take(&mut self) -> Option<RegionCacheSnapshot> {
+        if let Some(snap_result) = self.snap.take() {
+            match snap_result {
+                Ok(snap) => {
+                    SNAPSHOT_TYPE_COUNT_STATIC.in_memory_engine.inc();
+                    Some(snap)
+                }
+                Err(FailedReason::TooOldRead) => {
+                    IN_MEMORY_ENGINE_SNAPSHOT_ACQUIRE_FAILED_REASON_COUNT_STAIC
+                        .too_old_read
+                        .inc();
+                    SNAPSHOT_TYPE_COUNT_STATIC.rocksdb.inc();
+                    None
+                }
+                Err(FailedReason::NotCached) => {
+                    IN_MEMORY_ENGINE_SNAPSHOT_ACQUIRE_FAILED_REASON_COUNT_STAIC
+                        .not_cached
+                        .inc();
+                    SNAPSHOT_TYPE_COUNT_STATIC.rocksdb.inc();
+                    None
+                }
+                Err(FailedReason::EpochNotMatch) => {
+                    IN_MEMORY_ENGINE_SNAPSHOT_ACQUIRE_FAILED_REASON_COUNT_STAIC
+                        .epoch_not_match
+                        .inc();
+                    SNAPSHOT_TYPE_COUNT_STATIC.rocksdb.inc();
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    }
+}
+
+impl ObservedSnapshot for RegionCacheSnapshotPin {}
 
 #[derive(Clone)]
 pub struct HybridSnapshotObserver {
-    cache_engine: RangeCacheMemoryEngine,
+    cache_engine: RegionCacheMemoryEngine,
 }
 
 impl HybridSnapshotObserver {
-    pub fn new(cache_engine: RangeCacheMemoryEngine) -> Self {
+    pub fn new(cache_engine: RegionCacheMemoryEngine) -> Self {
         HybridSnapshotObserver { cache_engine }
     }
 
@@ -47,7 +96,7 @@ impl SnapshotObserver for HybridSnapshotObserver {
         // data from being evicted or deleted from the cache.
         // The data should be released when the snapshot is dropped.
         let region = CacheRegion::from_region(region);
-        let snap = new_in_memory_snapshot(&self.cache_engine, region, read_ts, sequence_number);
-        Box::new(RangeCacheSnapshotPin { snap })
+        let snap = Some(self.cache_engine.snapshot(region, read_ts, sequence_number));
+        Box::new(RegionCacheSnapshotPin { snap })
     }
 }

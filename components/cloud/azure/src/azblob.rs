@@ -11,14 +11,19 @@ use azure_core::{
     auth::{TokenCredential, TokenResponse},
     new_http_client,
 };
-use azure_identity::{ClientSecretCredential, TokenCredentialOptions};
+use azure_identity::{
+    AutoRefreshingTokenCredential, ClientSecretCredential, DefaultAzureCredential,
+    TokenCredentialOptions,
+};
 use azure_storage::{prelude::*, ConnectionString, ConnectionStringBuilder};
 use azure_storage_blobs::{blob::operations::PutBlockBlobBuilder, prelude::*};
 use cloud::blob::{
-    none_to_empty, BlobConfig, BlobStorage, BucketConf, PutResource, StringNonEmpty,
+    none_to_empty, unimplemented, BlobConfig, BlobObject, BlobStorage, BucketConf,
+    DeletableStorage, IterableStorage, PutResource, StringNonEmpty,
 };
 use futures::TryFutureExt;
 use futures_util::{
+    future::FutureExt,
     io::{AsyncRead, AsyncReadExt},
     stream,
     stream::StreamExt,
@@ -379,6 +384,51 @@ trait ContainerBuilder: 'static + Send + Sync {
     async fn get_client(&self) -> io::Result<Arc<ContainerClient>>;
 }
 
+/// Load the container client by the default behavior of the Azure SDK.
+///
+/// Also see [`DefaultAzureCredential`].
+struct DefaultContainerBuilder {
+    config: Config,
+    cred: AutoRefreshingTokenCredential,
+}
+
+impl DefaultContainerBuilder {
+    fn new(config: Config) -> Self {
+        Self {
+            config,
+            cred: AutoRefreshingTokenCredential::new(Arc::<DefaultAzureCredential>::default()),
+        }
+    }
+}
+
+#[async_trait]
+impl ContainerBuilder for DefaultContainerBuilder {
+    async fn get_client(&self) -> io::Result<Arc<ContainerClient>> {
+        let account_name = self.config.get_account_name()?;
+        let bucket = (*self.config.bucket.bucket).to_owned();
+
+        let token_resource = format!("https://{}.blob.core.windows.net", &account_name);
+        let token = self
+            .cred
+            .get_token(&token_resource)
+            .await
+            .map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("failed to get token from Azure AD, err: {:?}", e),
+                )
+            })?
+            .token;
+
+        let client = BlobServiceClient::new(
+            account_name,
+            StorageCredentials::bearer_token(token.secret()),
+        )
+        .container_client(bucket);
+        Ok(Arc::new(client))
+    }
+}
+
 struct SharedKeyContainerBuilder {
     container_client: Arc<ContainerClient>,
 }
@@ -631,10 +681,12 @@ impl AzureStorage {
                 client_builder,
             })
         } else {
-            Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "credential info not found".to_owned(),
-            ))
+            // When we cannot detect any user-specified configuration, fall back to the SDK
+            // default.
+            Ok(AzureStorage {
+                config: config.clone(),
+                client_builder: Arc::new(DefaultContainerBuilder::new(config)),
+            })
         }
     }
 
@@ -725,7 +777,7 @@ impl BlobStorage for AzureStorage {
     async fn put(
         &self,
         name: &str,
-        mut reader: PutResource,
+        mut reader: PutResource<'_>,
         content_length: u64,
     ) -> io::Result<()> {
         let name = self.maybe_prefix_key(name);
@@ -742,6 +794,23 @@ impl BlobStorage for AzureStorage {
 
     fn get_part(&self, name: &str, off: u64, len: u64) -> cloud::blob::BlobStream<'_> {
         self.get_range(name, Some(off..off + len))
+    }
+}
+
+impl IterableStorage for AzureStorage {
+    fn iter_prefix(
+        &self,
+        _prefix: &str,
+    ) -> std::pin::Pin<
+        Box<dyn futures::stream::Stream<Item = std::result::Result<BlobObject, io::Error>> + '_>,
+    > {
+        Box::pin(futures::future::err(unimplemented()).into_stream())
+    }
+}
+
+impl DeletableStorage for AzureStorage {
+    fn delete(&self, _name: &str) -> futures::prelude::future::LocalBoxFuture<'_, io::Result<()>> {
+        Box::pin(futures::future::err(unimplemented()))
     }
 }
 
