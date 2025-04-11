@@ -99,10 +99,11 @@ use tikv_util::{
     deadline::Deadline,
     future::try_poll,
     quota_limiter::QuotaLimiter,
-    time::{duration_to_ms, duration_to_sec, Instant, ThreadReadId},
+    time::{duration_to_ms, duration_to_sec, Instant, InstantExt, ThreadReadId},
 };
 use tracker::{
-    clear_tls_tracker_token, set_tls_tracker_token, with_tls_tracker, TrackedFuture, TrackerToken,
+    clear_tls_tracker_token, set_tls_tracker_token, with_tls_tracker, TlsTrackedFuture,
+    TrackerToken,
 };
 use txn_types::{Key, KvPair, Lock, LockType, TimeStamp, TsSet, Value};
 
@@ -606,7 +607,6 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
         key: Key,
         start_ts: TimeStamp,
     ) -> impl Future<Output = Result<(Option<Value>, KvGetStatistics)>> {
-        let stage_begin_ts = Instant::now();
         let deadline = Self::get_deadline(&ctx);
         const CMD: CommandKind = CommandKind::get;
         let priority = ctx.get_priority();
@@ -631,9 +631,10 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
         let mut sample = quota_limiter.new_sample(true);
         with_tls_tracker(|tracker| {
             tracker.metrics.grpc_process_nanos =
-                stage_begin_ts.saturating_elapsed().as_nanos() as u64;
+                tracker.req_info.begin.saturating_elapsed().as_nanos() as u64;
         });
 
+        let stage_begin_ts = Instant::now();
         self.read_pool_spawn_with_busy_check(
             busy_threshold,
             async move {
@@ -893,7 +894,7 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
 
                     let snap = Self::with_tls_engine(|engine| Self::snapshot(engine, snap_ctx));
                     req_snaps.push((
-                        TrackedFuture::new(snap),
+                        TlsTrackedFuture::new(snap),
                         key,
                         start_ts,
                         isolation_level,
@@ -1003,7 +1004,6 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
         mut keys: Vec<Key>,
         start_ts: TimeStamp,
     ) -> impl Future<Output = Result<(Vec<Result<KvPair>>, KvGetStatistics)>> {
-        let stage_begin_ts = Instant::now();
         let deadline = Self::get_deadline(&ctx);
         const CMD: CommandKind = CommandKind::buffer_batch_get;
         let priority = ctx.get_priority();
@@ -1032,8 +1032,9 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
         let mut sample = quota_limiter.new_sample(true);
         with_tls_tracker(|tracker| {
             tracker.metrics.grpc_process_nanos =
-                stage_begin_ts.saturating_elapsed().as_nanos() as u64;
+                tracker.req_info.begin.saturating_elapsed().as_nanos() as u64;
         });
+        let stage_begin_ts = Instant::now();
         self.read_pool_spawn_with_busy_check(
             busy_threshold,
             async move {
@@ -1199,7 +1200,6 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
         keys: Vec<Key>,
         start_ts: TimeStamp,
     ) -> impl Future<Output = Result<(Vec<Result<KvPair>>, KvGetStatistics)>> {
-        let stage_begin_ts = Instant::now();
         let deadline = Self::get_deadline(&ctx);
         const CMD: CommandKind = CommandKind::batch_get;
         let priority = ctx.get_priority();
@@ -1226,8 +1226,9 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
         let mut sample = quota_limiter.new_sample(true);
         with_tls_tracker(|tracker| {
             tracker.metrics.grpc_process_nanos =
-                stage_begin_ts.saturating_elapsed().as_nanos() as u64;
+                tracker.req_info.begin.saturating_elapsed().as_nanos() as u64;
         });
+        let stage_begin_ts = Instant::now();
         self.read_pool_spawn_with_busy_check(
             busy_threshold,
             async move {
@@ -3666,7 +3667,7 @@ impl<E: Engine, L: LockManager, F: KvFormat> TestStorageBuilder<E, L, F> {
             &self.config,
             ReadPool::from(read_pool).handle(),
             self.lock_mgr,
-            ConcurrencyManager::new(1.into()),
+            ConcurrencyManager::new_for_test(1.into()),
             DynamicConfigs {
                 pipelined_pessimistic_lock: self.pipelined_pessimistic_lock,
                 in_memory_pessimistic_lock: self.in_memory_pessimistic_lock,
@@ -3702,7 +3703,7 @@ impl<E: Engine, L: LockManager, F: KvFormat> TestStorageBuilder<E, L, F> {
             &self.config,
             ReadPool::from(read_pool).handle(),
             self.lock_mgr,
-            ConcurrencyManager::new(1.into()),
+            ConcurrencyManager::new_for_test(1.into()),
             DynamicConfigs {
                 pipelined_pessimistic_lock: self.pipelined_pessimistic_lock,
                 in_memory_pessimistic_lock: self.in_memory_pessimistic_lock,
@@ -3741,7 +3742,7 @@ impl<E: Engine, L: LockManager, F: KvFormat> TestStorageBuilder<E, L, F> {
             &self.config,
             ReadPool::from(read_pool).handle(),
             self.lock_mgr,
-            ConcurrencyManager::new(1.into()),
+            ConcurrencyManager::new_for_test(1.into()),
             DynamicConfigs {
                 pipelined_pessimistic_lock: self.pipelined_pessimistic_lock,
                 in_memory_pessimistic_lock: self.in_memory_pessimistic_lock,
